@@ -2523,6 +2523,15 @@ class PdfDocument:
             for i, page in enumerate(self.doc):
                 f.write(f"===== หน้า {i+1} =====\n{page.get_text()}\n")
 
+    def export_docx(self, path, layout=True, pages=None, tables=True,
+                    progress=None):
+        """Export to Word (.docx). See docx_export.export_docx for the options
+        and the returned stats. Imported lazily because building a document is
+        the only thing that needs it, and it drags in zipfile."""
+        from .docx_export import export_docx
+        return export_docx(self, path, layout=layout, pages=pages,
+                           tables=tables, progress=progress)
+
     def search(self, query, start_pno):
         n = self.page_count
         for offset in range(1, n + 1):

@@ -5,7 +5,7 @@ import os
 import sys
 
 APP_NAME = "WnyEditPDF"
-VERSION = "5.8.1"
+VERSION = "5.10.0"
 ORG_NAME = "WnyEdit"
 
 # ---------- tool modes ----------

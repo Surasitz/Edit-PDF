@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wnyeditpdf"
-version = "5.8.1"
+version = "5.10.0"
 description = "โปรแกรมอ่านและแก้ไขไฟล์ PDF ภาษาไทย สำหรับงานเอกสารราชการ (Thai PDF reader & editor)"
 readme = "README.md"
 requires-python = ">=3.9"

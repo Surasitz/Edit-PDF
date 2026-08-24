@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QMessageBox, QToolBar,
     QLabel, QScrollArea, QInputDialog, QLineEdit, QWidget, QSizePolicy,
     QStatusBar, QListWidget, QListWidgetItem, QSplitter, QSpinBox,
-    QComboBox, QToolButton, QDialog, QMenu
+    QComboBox, QToolButton, QDialog, QMenu, QProgressDialog
 )
 from PyQt6.QtGui import (
     QAction, QPixmap, QImage, QColor, QIcon, QKeySequence, QPalette
@@ -32,10 +32,12 @@ from .config import (
 from .fonts import FontManager
 from .document import PdfDocument
 from .i18n import tr as _tr
+from .docx_export import ExportCancelled
 from .widgets import (PageView, TextEditDialog, SignatureDialog, CommentDialog,
                       FindReplaceDialog, SearchBar,
                       ThumbnailList, symbol_image, qr_png_bytes,
-                      stamp_text_image, ScanEnhanceDialog)
+                      stamp_text_image, ScanEnhanceDialog, WordExportDialog,
+                      CompressDialog)
 
 MAX_RECENT = 6
 
@@ -197,7 +199,10 @@ class MainWindow(QMainWindow):
                   self.show_version_history)
         m_file.addSeparator()
         self._act(m_file, self.T("รวม PDF (เลือกหน้า + ตำแหน่งแทรก)..."), self.merge_pdf)
+        self._act(m_file, self.T("🗜 บีบอัด PDF ลดขนาดไฟล์ (ทีเดียวหลายไฟล์)..."),
+                  self.compress_pdfs)
         self._act(m_file, self.T("ส่งออกหน้านี้เป็น PNG..."), self.export_png)
+        self._act(m_file, self.T("📝 แปลงเป็น Word (.docx)..."), self.export_word)
         self._act(m_file, self.T("ดึงข้อความทั้งไฟล์เป็น .txt..."), self.export_text)
         m_file.addSeparator()
         self._act(m_file, self.T("ออกจากโปรแกรม"), self.close, "Ctrl+Q")
@@ -908,6 +913,111 @@ class MainWindow(QMainWindow):
             return
         self.pdf.export_all_text(path)
         self.status("ดึงข้อความทั้งไฟล์เรียบร้อย")
+
+    def compress_pdfs(self):
+        """Shrink PDFs - the open one and/or any others - in one batch run.
+
+        The originals are never written over: every result is a new
+        *_compressed.pdf, so a squeeze that came out too soft costs the user
+        nothing but a delete. Whatever file is open is put in the list to save
+        the usual trip through the file dialog.
+        """
+        files = []
+        if self.pdf.is_open() and self.pdf.path:
+            if self.pdf.modified:
+                ans = QMessageBox.question(
+                    self, APP_NAME,
+                    self.T("ไฟล์ที่เปิดอยู่ยังมีการแก้ไขที่ไม่ได้บันทึก\n"
+                           "การบีบอัดจะใช้ไฟล์ที่บันทึกไว้บนเครื่อง\n\n"
+                           "ต้องการบันทึกก่อนหรือไม่?"),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if ans == QMessageBox.StandardButton.Yes:
+                    self.save_pdf()
+            files.append(self.pdf.path)
+
+        dlg = CompressDialog(self, self.T, files)
+        dlg.exec()
+        if dlg.results:
+            before = sum(r["before"] for r in dlg.results)
+            after = sum(r["after"] for r in dlg.results)
+            pct = (before - after) * 100.0 / before if before else 0
+            self.status(self.T("บีบอัดแล้ว %d ไฟล์ — เล็กลง %.0f%% ✓")
+                        % (len(dlg.results), pct))
+
+    def export_word(self):
+        """Convert the document to a .docx the user can open in Word."""
+        if not self.pdf.is_open():
+            return self.need_file()
+        dlg = WordExportDialog(self, self.T, self.pdf.page_count,
+                               self.page_index + 1)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        layout, spec, tables = dlg.values()
+
+        pages = None
+        if spec:
+            nums = self._parse_pages(spec, self.pdf.page_count)
+            if not nums:
+                QMessageBox.warning(self, APP_NAME,
+                                    self.T("รูปแบบหน้าไม่ถูกต้องหรืออยู่นอกช่วง"))
+                return
+            pages = [n - 1 for n in nums]
+
+        stem = os.path.splitext(os.path.basename(self.pdf.path or "document"))[0]
+        path, _ = QFileDialog.getSaveFileName(
+            self, self.T("บันทึกเป็นไฟล์ Word"), stem + ".docx",
+            "Word (*.docx)")
+        if not path:
+            return
+        if not path.lower().endswith(".docx"):
+            path += ".docx"
+
+        n_total = len(pages) if pages else self.pdf.page_count
+        bar = QProgressDialog(self.T("กำลังแปลงเป็น Word..."), self.T("ยกเลิก"),
+                              0, n_total, self)
+        bar.setWindowTitle(APP_NAME)
+        bar.setWindowModality(Qt.WindowModality.WindowModal)
+        bar.setMinimumDuration(400)
+
+        def tick(done, total):
+            bar.setValue(done)
+            QApplication.processEvents()
+            return not bar.wasCanceled()
+
+        try:
+            stats = self.pdf.export_docx(path, layout=layout, pages=pages,
+                                         tables=tables, progress=tick)
+        except ExportCancelled:
+            bar.close()
+            try:
+                os.remove(path)          # a half-written docx would not open
+            except OSError:
+                pass
+            self.status(self.T("ยกเลิกการแปลงแล้ว"))
+            return
+        except Exception as e:
+            bar.close()
+            QMessageBox.critical(self, APP_NAME,
+                                 self.T("แปลงเป็น Word ไม่สำเร็จ:\n%s") % e)
+            return
+        bar.setValue(n_total)
+        bar.close()
+
+        msg = self.T("แปลงเป็น Word แล้ว %d หน้า: %s ✓") % (
+            stats["pages"], os.path.basename(path))
+        self.status(msg)
+        # Pages whose text could not be decoded went in as pictures. Say so now
+        # rather than let the user find unselectable text later and assume the
+        # converter mangled it.
+        if stats["picture_pages"]:
+            nums = ", ".join(str(p) for p in stats["picture_pages"][:12])
+            more = "..." if len(stats["picture_pages"]) > 12 else ""
+            QMessageBox.information(
+                self, APP_NAME,
+                self.T("แปลงเสร็จแล้ว แต่หน้า %s%s อ่านตัวอักษรจากไฟล์ PDF "
+                       "ไม่ได้ (ไฟล์ต้นฉบับไม่ได้ฝังตารางรหัสตัวอักษรมา)\n\n"
+                       "จึงใส่เป็นรูปภาพให้แทน เพื่อไม่ให้ได้ข้อความที่เพี้ยน")
+                % (nums, more))
 
     # ======================================================
     #  Undo / Redo

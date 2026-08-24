@@ -24,6 +24,7 @@ EN = {
     "บันทึกแบบมีรหัสผ่าน...": "Save with password...",
     "รวม PDF (เลือกหน้า + ตำแหน่งแทรก)...": "Merge PDF (pick pages + position)...",
     "ส่งออกหน้านี้เป็น PNG...": "Export this page as PNG...",
+    "📝 แปลงเป็น Word (.docx)...": "📝 Convert to Word (.docx)...",
     "ดึงข้อความทั้งไฟล์เป็น .txt...": "Extract all text to .txt...",
     "ออกจากโปรแกรม": "Quit",
     # ----- Edit menu -----
@@ -77,6 +78,43 @@ EN = {
     "หน้านี้ไม่ใช่หน้าสแกน (มีข้อความจริงอยู่)\n\nถ้าปรับแต่ง ข้อความจะกลายเป็นรูปภาพ แก้ไขข้อความไม่ได้อีก\nต้องการทำต่อหรือไม่?": "This page is not a scan - it contains real text.\n\nEnhancing it turns the text into pixels, so it can no longer be edited.\nContinue anyway?",
     "ปรับแต่งรูปสแกนแล้ว ✓ (Ctrl+Z ย้อนกลับได้)": "Scan enhanced \u2713 (Ctrl+Z to undo)",
     "ปรับแต่งไม่สำเร็จ": "Could not enhance the scan",
+    # ----- PDF -> Word -----
+    "แปลง PDF เป็น Word": "Convert PDF to Word",
+    "เลือกรูปแบบไฟล์ Word ที่ต้องการ": "Choose the kind of Word file you want",
+    "คงหน้าตาเดิมทุกอย่าง (แนะนำ)": "Keep the original look (recommended)",
+    "ตัวอักษร ตำแหน่ง ตาราง และฟอร์ม อยู่ตรงเดิมเป๊ะ\n"
+    "เหมาะกับหนังสือราชการ แบบฟอร์ม ใบเสร็จ ที่ต้องเหมือนต้นฉบับ":
+        "Text, positions, tables and forms land exactly where they were.\n"
+        "Best for official letters, forms and receipts that must match the original.",
+    "พิมพ์แก้ต่อได้ง่าย (ข้อความไหลต่อกัน)": "Easy to keep writing in (flowing text)",
+    "ได้ย่อหน้าปกติแบบที่พิมพ์เองใน Word แก้ไขสะดวกกว่า\n"
+    "แต่หน้าที่มีหลายคอลัมน์หรือฟอร์มซับซ้อนอาจเลื่อนได้":
+        "Ordinary paragraphs like ones you would type yourself, much easier to edit,\n"
+        "but multi-column pages and complicated forms may shift.",
+    "แปลงตารางที่มีเส้นให้เป็นตารางของ Word":
+        "Turn ruled tables into real Word tables",
+    "หน้าที่จะแปลง:": "Pages to convert:",
+    "เว้นว่าง = ทั้งไฟล์ (%d หน้า) — หรือระบุ เช่น 1-3,5":
+        "Blank = whole file (%d pages) — or list them, e.g. 1-3,5",
+    "ฟอนต์และขนาดตัวอักษรเดิมถูกเก็บไว้ครบ รวมภาษาไทย\n"
+    "หน้าที่เป็นรูปสแกน จะถูกใส่เป็นรูปภาพให้แทน":
+        "The original fonts and sizes are kept, Thai included.\n"
+        "Scanned pages come across as pictures.",
+    "แปลงเลย": "Convert",
+    "บันทึกเป็นไฟล์ Word": "Save as a Word file",
+    "กำลังแปลงเป็น Word...": "Converting to Word...",
+    "ยกเลิก": "Cancel",
+    "ยกเลิกการแปลงแล้ว": "Conversion cancelled.",
+    "แปลงเป็น Word ไม่สำเร็จ:\n%s": "Could not convert to Word:\n%s",
+    "แปลงเป็น Word แล้ว %d หน้า: %s ✓": "Converted %d pages to Word: %s ✓",
+    "รูปแบบหน้าไม่ถูกต้องหรืออยู่นอกช่วง":
+        "That page range is not valid or is out of range.",
+    "แปลงเสร็จแล้ว แต่หน้า %s%s อ่านตัวอักษรจากไฟล์ PDF "
+    "ไม่ได้ (ไฟล์ต้นฉบับไม่ได้ฝังตารางรหัสตัวอักษรมา)\n\n"
+    "จึงใส่เป็นรูปภาพให้แทน เพื่อไม่ให้ได้ข้อความที่เพี้ยน":
+        "Done — but the characters on page %s%s could not be read out of the PDF "
+        "(the original has no usable character map embedded).\n\n"
+        "Those pages went in as pictures, so you don't get garbled text.",
     "จัดการลิงก์": "Manage link",
     "แก้ไขลิงก์": "Edit link",
     "เอาลิงก์ออก": "Remove link",
@@ -135,6 +173,72 @@ EN = {
     "เลือกสีไฮไลท์": "Highlight colour",
     # ----- language button -----
     "ภาษา: ไทย": "Language: English",
+    # ----- compress PDF -----
+    "🗜 บีบอัด PDF ลดขนาดไฟล์ (ทีเดียวหลายไฟล์)...":
+        "🗜 Compress PDF - shrink file size (many at once)...",
+    "บีบอัด PDF (ลดขนาดไฟล์)": "Compress PDF (shrink file size)",
+    "ลดขนาดไฟล์ PDF ได้ทีละหลายไฟล์": "Shrink several PDF files in one go",
+    "ลากไฟล์ PDF มาวางตรงนี้ หรือกดปุ่ม 'เพิ่มไฟล์'\n"
+    "ทุกอย่างทำในเครื่องคุณ ไม่มีการอัปโหลดไฟล์ออกไปไหน และไฟล์ต้นฉบับไม่ถูกแก้":
+        "Drop PDF files here, or use 'Add files'.\n"
+        "Everything runs on your machine - nothing is uploaded, and the "
+        "originals are never modified.",
+    "ไฟล์": "File",
+    "ขนาดเดิม": "Before",
+    "ขนาดใหม่": "After",
+    "ผลลัพธ์": "Result",
+    "➕ เพิ่มไฟล์...": "➕ Add files...",
+    "เอาออก": "Remove",
+    "ล้างรายการ": "Clear list",
+    "รวม %d ไฟล์ • %s": "%d files • %s",
+    "เลือกไฟล์ PDF (เลือกได้หลายไฟล์)": "Choose PDF files (more than one is fine)",
+    "ระดับการบีบอัด:": "Compression level:",
+    "คุณภาพสูง": "High quality",
+    "สมดุล (แนะนำ)": "Balanced (recommended)",
+    "เล็กที่สุด": "Smallest",
+    "ภาพยังคมเกือบเท่าเดิม เหมาะกับงานที่ต้องพิมพ์ออกมาชัดๆ (ลดขนาดได้น้อยกว่าแบบอื่น)":
+        "Images stay almost as sharp - for documents you need to print "
+        "crisply (saves less than the other levels).",
+    "ลดขนาดได้มาก ภาพยังอ่านง่ายทั้งบนจอและตอนพิมพ์ — เหมาะกับเอกสารสแกนทั่วไป":
+        "A big saving with images still easy to read on screen and in print - "
+        "right for everyday scans.",
+    "ไฟล์เล็กที่สุด เหมาะกับการส่งอีเมลหรืออัปโหลดเข้าระบบ ที่จำกัดขนาดไฟล์ (ภาพจะหยาบลงบ้าง)":
+        "The smallest file, for e-mail or upload limits (images get a little "
+        "rough).",
+    "แปลงรูปในไฟล์เป็นขาวดำ (เอกสารสแกนขาวดำจะเล็กลงอีกมาก)":
+        "Turn the images grey-scale (a black-and-white scan gets much smaller)",
+    "ตัดฟอนต์ที่ฝังมาให้เหลือเฉพาะตัวอักษรที่ใช้จริง":
+        "Trim embedded fonts down to the characters actually used",
+    "ช่วยได้มากกับหนังสือราชการที่ฝังฟอนต์ไทยมาทั้งชุด\n"
+    "ถ้าจะเอาไฟล์ผลลัพธ์ไปพิมพ์ข้อความเพิ่มทีหลัง แนะนำให้เอาเครื่องหมายออก":
+        "A big win for official documents that embed whole Thai font "
+        "families.\nUntick it if you plan to keep typing in the result.",
+    "บันทึกไว้โฟลเดอร์เดียวกับไฟล์ต้นฉบับ": "Save next to the original files",
+    "โฟลเดอร์อื่น:": "Another folder:",
+    "เลือก...": "Browse...",
+    "เลือกโฟลเดอร์ปลายทาง": "Choose the destination folder",
+    "บีบอัดเลย": "Compress",
+    "ปิด": "Close",
+    "หยุด": "Stop",
+    "กำลังหยุด...": "Stopping...",
+    "📂 เปิดโฟลเดอร์ผลลัพธ์": "📂 Open the results folder",
+    "รอคิว": "Queued",
+    "กำลังบีบอัด...": "Compressing...",
+    "ยกเลิกแล้ว": "Cancelled",
+    "ไฟล์มีรหัสผ่าน": "Password-protected",
+    "ไม่สำเร็จ": "Failed",
+    "เล็กที่สุดแล้ว": "Already smallest",
+    "ลดลง %.0f%%": "%.0f%% smaller",
+    "ยังไม่ได้บีบอัดไฟล์ใด": "No file was compressed",
+    "เสร็จแล้ว %d ไฟล์ • จาก %s เหลือ %s (ประหยัด %s / %.0f%%)":
+        "Done: %d files • %s down to %s (saved %s / %.0f%%)",
+    "ไฟล์ที่เปิดอยู่ยังมีการแก้ไขที่ไม่ได้บันทึก\n"
+    "การบีบอัดจะใช้ไฟล์ที่บันทึกไว้บนเครื่อง\n\n"
+    "ต้องการบันทึกก่อนหรือไม่?":
+        "The open file has unsaved changes.\n"
+        "Compression works on the copy saved on disk.\n\nSave it first?",
+    "บีบอัดแล้ว %d ไฟล์ — เล็กลง %.0f%% ✓":
+        "Compressed %d files - %.0f%% smaller ✓",
     # ----- welcome / common status -----
     "ยินดีต้อนรับสู่ WnyEditPDF — เปิดไฟล์ PDF เพื่อเริ่มใช้งาน (Ctrl+O)":
         "Welcome to WnyEditPDF — open a PDF to get started (Ctrl+O)",

@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
 """WnyEditPDF widgets: dialogs, page view, thumbnail strip and search bar."""
 
+import os
+
 import fitz
 
 from PyQt6.QtWidgets import (
     QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
     QSpinBox, QDialogButtonBox, QPlainTextEdit, QTabWidget, QLineEdit,
     QComboBox, QFileDialog, QMessageBox, QColorDialog, QToolButton,
-    QListWidget, QListWidgetItem, QMenu, QCheckBox, QSlider, QGridLayout
+    QListWidget, QListWidgetItem, QMenu, QCheckBox, QSlider, QGridLayout,
+    QRadioButton, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
+    QAbstractItemView, QApplication
 )
 from PyQt6.QtGui import (
     QImage, QPainter, QColor, QPen, QFontDatabase, QFont, QPixmap, QIcon,
-    QFontMetrics
+    QFontMetrics, QDesktopServices
 )
-from PyQt6.QtCore import Qt, QRect, QPoint, QBuffer, QIODevice, QSize
+from PyQt6.QtCore import Qt, QRect, QPoint, QBuffer, QIODevice, QSize, QUrl
 
 from .config import (
     ADOBE_BLUE, APP_NAME,
@@ -589,6 +593,464 @@ class FindReplaceDialog(QDialog):
             return
         self.result = (action, find, self.edit_repl.text())
         self.accept()
+
+
+class WordExportDialog(QDialog):
+    """Pick how a PDF should be turned into a Word file.
+
+    The two modes are a genuine trade-off rather than a quality setting, so the
+    user has to see both: frames reproduce the page exactly but are fiddly to
+    retype in, flowing paragraphs are pleasant to edit but will not hold a
+    complicated form together. Either way the words themselves are identical."""
+
+    def __init__(self, parent=None, tr=None, page_count=1, cur_page=1):
+        super().__init__(parent)
+        T = tr or (lambda s: s)
+        self._T = T
+        self.setWindowTitle(T("แปลง PDF เป็น Word"))
+        self.setMinimumWidth(500)
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+
+        head = QLabel(T("เลือกรูปแบบไฟล์ Word ที่ต้องการ"))
+        head.setStyleSheet("font-weight: 600; font-size: 14px;")
+        lay.addWidget(head)
+
+        self.rb_layout = QRadioButton(T("คงหน้าตาเดิมทุกอย่าง (แนะนำ)"))
+        self.rb_layout.setChecked(True)
+        lay.addWidget(self.rb_layout)
+        hint1 = QLabel(T("ตัวอักษร ตำแหน่ง ตาราง และฟอร์ม อยู่ตรงเดิมเป๊ะ\n"
+                         "เหมาะกับหนังสือราชการ แบบฟอร์ม ใบเสร็จ ที่ต้องเหมือนต้นฉบับ"))
+        hint1.setStyleSheet("color: #6b7280; margin-left: 22px;")
+        lay.addWidget(hint1)
+
+        self.rb_flow = QRadioButton(T("พิมพ์แก้ต่อได้ง่าย (ข้อความไหลต่อกัน)"))
+        lay.addWidget(self.rb_flow)
+        hint2 = QLabel(T("ได้ย่อหน้าปกติแบบที่พิมพ์เองใน Word แก้ไขสะดวกกว่า\n"
+                         "แต่หน้าที่มีหลายคอลัมน์หรือฟอร์มซับซ้อนอาจเลื่อนได้"))
+        hint2.setStyleSheet("color: #6b7280; margin-left: 22px;")
+        lay.addWidget(hint2)
+
+        self.chk_tables = QCheckBox(T("แปลงตารางที่มีเส้นให้เป็นตารางของ Word"))
+        self.chk_tables.setChecked(True)
+        self.chk_tables.setStyleSheet("margin-left: 22px;")
+        lay.addWidget(self.chk_tables)
+        self.rb_flow.toggled.connect(self.chk_tables.setEnabled)
+        self.chk_tables.setEnabled(False)
+
+        lay.addSpacing(6)
+        row = QHBoxLayout()
+        row.addWidget(QLabel(T("หน้าที่จะแปลง:")))
+        self.pages = QLineEdit()
+        self.pages.setPlaceholderText(
+            T("เว้นว่าง = ทั้งไฟล์ (%d หน้า) — หรือระบุ เช่น 1-3,5") % page_count)
+        row.addWidget(self.pages, 1)
+        lay.addLayout(row)
+
+        note = QLabel(T("ฟอนต์และขนาดตัวอักษรเดิมถูกเก็บไว้ครบ รวมภาษาไทย\n"
+                        "หน้าที่เป็นรูปสแกน จะถูกใส่เป็นรูปภาพให้แทน"))
+        note.setStyleSheet("color: #6b7280;")
+        lay.addWidget(note)
+
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                              | QDialogButtonBox.StandardButton.Cancel)
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText(T("แปลงเลย"))
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def values(self):
+        """(layout_mode, page_spec_text, want_tables)"""
+        return (self.rb_layout.isChecked(), self.pages.text().strip(),
+                self.chk_tables.isChecked())
+
+
+class CompressDialog(QDialog):
+    """Shrink PDF files - a whole pile of them in one go.
+
+    Batch is the point, not a bonus: nobody compresses one file. They have a
+    folder of scans that a hospital mail server bounces at 10 MB, and they want
+    all of them fixed before lunch. So the dialog is a work list - drop files
+    on it, pick how hard to squeeze once, and watch each row report what it
+    saved. Files are processed one after another (PyMuPDF is happiest on one
+    document at a time) but as a single unattended run.
+
+    Nothing is ever written over an input file: each result goes to a new
+    ``*_compressed.pdf`` next to the original, or to a folder the user picks.
+    """
+
+    def __init__(self, parent=None, tr=None, files=None):
+        super().__init__(parent)
+        T = tr or (lambda s: s)
+        self._T = T
+        self._busy = False
+        self._cancel = False
+        self.paths = []          # row index -> source path
+        self.results = []        # stats dicts, filled in as the run goes
+        self.out_files = []      # what we actually wrote
+
+        self.setWindowTitle(T("บีบอัด PDF (ลดขนาดไฟล์)"))
+        self.setMinimumSize(760, 600)
+        self.setAcceptDrops(True)
+        lay = QVBoxLayout(self)
+        lay.setSpacing(9)
+
+        head = QLabel(T("ลดขนาดไฟล์ PDF ได้ทีละหลายไฟล์"))
+        head.setStyleSheet("font-weight: 600; font-size: 14px;")
+        lay.addWidget(head)
+        sub = QLabel(T("ลากไฟล์ PDF มาวางตรงนี้ หรือกดปุ่ม 'เพิ่มไฟล์'\n"
+                       "ทุกอย่างทำในเครื่องคุณ ไม่มีการอัปโหลดไฟล์ออกไปไหน "
+                       "และไฟล์ต้นฉบับไม่ถูกแก้"))
+        sub.setStyleSheet("color: #6b7280;")
+        lay.addWidget(sub)
+
+        # ---------------- the work list ----------------
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels([
+            T("ไฟล์"), T("ขนาดเดิม"), T("ขนาดใหม่"), T("ผลลัพธ์")])
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAcceptDrops(False)          # let drops reach the dialog
+        self.table.viewport().setAcceptDrops(False)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (1, 2, 3):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        lay.addWidget(self.table, 1)
+
+        row = QHBoxLayout()
+        self.btn_add = QPushButton(T("➕ เพิ่มไฟล์..."))
+        self.btn_add.clicked.connect(self._browse_files)
+        self.btn_del = QPushButton(T("เอาออก"))
+        self.btn_del.setProperty("flat", True)
+        self.btn_del.clicked.connect(self._remove_selected)
+        self.btn_clear = QPushButton(T("ล้างรายการ"))
+        self.btn_clear.setProperty("flat", True)
+        self.btn_clear.clicked.connect(self._clear)
+        row.addWidget(self.btn_add)
+        row.addWidget(self.btn_del)
+        row.addWidget(self.btn_clear)
+        row.addStretch(1)
+        self.lbl_total = QLabel()
+        self.lbl_total.setStyleSheet("color: #6b7280;")
+        row.addWidget(self.lbl_total)
+        lay.addLayout(row)
+
+        # ---------------- how hard to squeeze ----------------
+        lay.addWidget(_hline())
+        # the hint label exists before the radios are wired: setChecked() below
+        # fires toggled straight away, and a slot that raises takes the whole
+        # application down with it
+        self.hint = QLabel()
+        self.hint.setStyleSheet("color: #6b7280; margin-left: 4px;")
+        self.hint.setWordWrap(True)
+
+        lvl_row = QHBoxLayout()
+        lvl_row.addWidget(QLabel(T("ระดับการบีบอัด:")))
+        self.levels = {}
+        for key, label in (("light", T("คุณภาพสูง")),
+                           ("balanced", T("สมดุล (แนะนำ)")),
+                           ("max", T("เล็กที่สุด"))):
+            rb = QRadioButton(label)
+            rb.toggled.connect(self._show_hint)
+            lvl_row.addWidget(rb)
+            self.levels[key] = rb
+        self.levels["balanced"].setChecked(True)
+        lvl_row.addStretch(1)
+        lay.addLayout(lvl_row)
+        lay.addWidget(self.hint)
+
+        self.chk_gray = QCheckBox(T("แปลงรูปในไฟล์เป็นขาวดำ (เอกสารสแกนขาวดำจะเล็กลงอีกมาก)"))
+        lay.addWidget(self.chk_gray)
+        self.chk_fonts = QCheckBox(T("ตัดฟอนต์ที่ฝังมาให้เหลือเฉพาะตัวอักษรที่ใช้จริง"))
+        self.chk_fonts.setChecked(True)
+        self.chk_fonts.setToolTip(
+            T("ช่วยได้มากกับหนังสือราชการที่ฝังฟอนต์ไทยมาทั้งชุด\n"
+              "ถ้าจะเอาไฟล์ผลลัพธ์ไปพิมพ์ข้อความเพิ่มทีหลัง แนะนำให้เอาเครื่องหมายออก"))
+        lay.addWidget(self.chk_fonts)
+
+        # ---------------- where the results go ----------------
+        out_row = QHBoxLayout()
+        self.rb_same = QRadioButton(T("บันทึกไว้โฟลเดอร์เดียวกับไฟล์ต้นฉบับ"))
+        self.rb_same.setChecked(True)
+        self.rb_other = QRadioButton(T("โฟลเดอร์อื่น:"))
+        self.out_dir = QLineEdit()
+        self.out_dir.setReadOnly(True)
+        self.out_dir.setEnabled(False)
+        self.btn_dir = QPushButton(T("เลือก..."))
+        self.btn_dir.setProperty("flat", True)
+        self.btn_dir.setEnabled(False)
+        self.btn_dir.clicked.connect(self._pick_dir)
+        self.rb_other.toggled.connect(self.out_dir.setEnabled)
+        self.rb_other.toggled.connect(self.btn_dir.setEnabled)
+        self.rb_other.toggled.connect(
+            lambda on: on and not self.out_dir.text() and self._pick_dir())
+        out_row.addWidget(self.rb_same)
+        out_row.addWidget(self.rb_other)
+        out_row.addWidget(self.out_dir, 1)
+        out_row.addWidget(self.btn_dir)
+        lay.addLayout(out_row)
+
+        # ---------------- progress + buttons ----------------
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(0)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(8)
+        lay.addWidget(self.bar)
+        self.lbl_status = QLabel(" ")
+        self.lbl_status.setStyleSheet("color: #6b7280;")
+        lay.addWidget(self.lbl_status)
+
+        bb = QHBoxLayout()
+        self.btn_open = QPushButton(T("📂 เปิดโฟลเดอร์ผลลัพธ์"))
+        self.btn_open.setProperty("flat", True)
+        self.btn_open.setVisible(False)
+        self.btn_open.clicked.connect(self._open_folder)
+        bb.addWidget(self.btn_open)
+        bb.addStretch(1)
+        self.btn_close = QPushButton(T("ปิด"))
+        self.btn_close.setProperty("flat", True)
+        self.btn_close.clicked.connect(self.close)
+        self.btn_go = QPushButton(T("บีบอัดเลย"))
+        self.btn_go.clicked.connect(self._go)
+        bb.addWidget(self.btn_close)
+        bb.addWidget(self.btn_go)
+        lay.addLayout(bb)
+
+        self._show_hint()
+        self.add_files(files or [])
+
+    # ------------------------------------------------------------- the list
+    def add_files(self, paths):
+        """Add PDFs to the work list, ignoring duplicates and non-PDFs."""
+        from .compress import human_size
+        have = {os.path.normcase(os.path.abspath(p)) for p in self.paths}
+        added = 0
+        for p in paths:
+            if not p or not p.lower().endswith(".pdf") or not os.path.isfile(p):
+                continue
+            key = os.path.normcase(os.path.abspath(p))
+            if key in have:
+                continue
+            have.add(key)
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            name = QTableWidgetItem(os.path.basename(p))
+            name.setToolTip(p)
+            self.table.setItem(r, 0, name)
+            self.table.setItem(r, 1, QTableWidgetItem(
+                human_size(os.path.getsize(p))))
+            self.table.setItem(r, 2, QTableWidgetItem("-"))
+            self.table.setItem(r, 3, QTableWidgetItem(self._T("รอคิว")))
+            self.paths.append(p)
+            added += 1
+        if added:
+            self._reset_results()
+        self._refresh_total()
+        return added
+
+    def _browse_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, self._T("เลือกไฟล์ PDF (เลือกได้หลายไฟล์)"), "", "PDF (*.pdf)")
+        self.add_files(paths)
+
+    def _remove_selected(self):
+        for r in sorted({i.row() for i in self.table.selectedIndexes()},
+                        reverse=True):
+            self.table.removeRow(r)
+            del self.paths[r]
+        self._refresh_total()
+
+    def _clear(self):
+        self.table.setRowCount(0)
+        self.paths = []
+        self._refresh_total()
+
+    def _reset_results(self):
+        """A new run starts from a clean slate of result cells."""
+        self.results = []
+        self.out_files = []
+        self.btn_open.setVisible(False)
+        self.bar.setValue(0)
+        for r in range(self.table.rowCount()):
+            self.table.item(r, 2).setText("-")
+            self._set_result(r, self._T("รอคิว"), "#6b7280")
+
+    def _refresh_total(self):
+        from .compress import human_size
+        total = sum(os.path.getsize(p) for p in self.paths
+                    if os.path.exists(p))
+        self.lbl_total.setText(
+            self._T("รวม %d ไฟล์ • %s") % (len(self.paths), human_size(total)))
+        self.btn_go.setEnabled(bool(self.paths))
+
+    def _set_result(self, row, text, color):
+        it = QTableWidgetItem(text)
+        it.setForeground(QColor(color))
+        self.table.setItem(row, 3, it)
+
+    # ------------------------------------------------------------- options
+    def _level(self):
+        for key, rb in self.levels.items():
+            if rb.isChecked():
+                return key
+        return "balanced"
+
+    def _show_hint(self):
+        T = self._T
+        self.hint.setText({
+            "light": T("ภาพยังคมเกือบเท่าเดิม เหมาะกับงานที่ต้องพิมพ์ออกมาชัดๆ "
+                       "(ลดขนาดได้น้อยกว่าแบบอื่น)"),
+            "balanced": T("ลดขนาดได้มาก ภาพยังอ่านง่ายทั้งบนจอและตอนพิมพ์ "
+                          "— เหมาะกับเอกสารสแกนทั่วไป"),
+            "max": T("ไฟล์เล็กที่สุด เหมาะกับการส่งอีเมลหรืออัปโหลดเข้าระบบ "
+                     "ที่จำกัดขนาดไฟล์ (ภาพจะหยาบลงบ้าง)"),
+        }[self._level()])
+
+    def _pick_dir(self):
+        d = QFileDialog.getExistingDirectory(
+            self, self._T("เลือกโฟลเดอร์ปลายทาง"), self.out_dir.text() or "")
+        if d:
+            self.out_dir.setText(d)
+        elif not self.out_dir.text():
+            self.rb_same.setChecked(True)
+
+    def _target_dir(self):
+        if self.rb_other.isChecked() and self.out_dir.text().strip():
+            return self.out_dir.text().strip()
+        return None
+
+    # ------------------------------------------------------------ drag/drop
+    def dragEnterEvent(self, e):
+        if self._busy:
+            return
+        md = e.mimeData()
+        if md.hasUrls() and any(u.toLocalFile().lower().endswith(".pdf")
+                                for u in md.urls()):
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        self.dragEnterEvent(e)
+
+    def dropEvent(self, e):
+        if self._busy:
+            return
+        self.add_files([u.toLocalFile() for u in e.mimeData().urls()])
+        e.acceptProposedAction()
+
+    # ---------------------------------------------------------------- run
+    def _go(self):
+        if self._busy:                      # the button doubles as Stop
+            self._cancel = True
+            self.lbl_status.setText(self._T("กำลังหยุด..."))
+            return
+        if not self.paths:
+            return
+        self._run()
+
+    def _set_busy(self, busy):
+        self._busy = busy
+        self._cancel = False
+        for w in (self.btn_add, self.btn_del, self.btn_clear, self.table,
+                  self.chk_gray, self.chk_fonts, self.rb_same, self.rb_other,
+                  self.btn_close):
+            w.setEnabled(not busy)
+        for rb in self.levels.values():
+            rb.setEnabled(not busy)
+        self.btn_dir.setEnabled(not busy and self.rb_other.isChecked())
+        self.btn_go.setText(self._T("หยุด") if busy else self._T("บีบอัดเลย"))
+
+    def _run(self):
+        from . import compress as cz
+        T = self._T
+        self._reset_results()
+        self._set_busy(True)
+        out_dir = self._target_dir()
+        level, gray = self._level(), self.chk_gray.isChecked()
+        fonts = self.chk_fonts.isChecked()
+        n = len(self.paths)
+        before_all = after_all = 0
+
+        for row, src in enumerate(list(self.paths)):
+            if self._cancel:
+                break
+            self.table.selectRow(row)
+            self._set_result(row, T("กำลังบีบอัด..."), "#1473e6")
+            self.lbl_status.setText(
+                T("(%d/%d) %s") % (row + 1, n, os.path.basename(src)))
+            QApplication.processEvents()
+
+            def tick(done, total, row=row, n=n):
+                frac = (row + (done / total if total else 1)) / n
+                self.bar.setValue(int(frac * 1000))
+                QApplication.processEvents()
+                return not self._cancel
+
+            try:
+                dst = cz.output_path(src, out_dir)
+                st = cz.compress_file(src, dst, level=level, grayscale=gray,
+                                      subset_fonts=fonts, progress=tick)
+            except cz.CompressCancelled:
+                self._set_result(row, T("ยกเลิกแล้ว"), "#6b7280")
+                break
+            except cz.CompressError as e:
+                msg = (T("ไฟล์มีรหัสผ่าน") if "locked" in str(e)
+                       else T("ไม่สำเร็จ"))
+                self._set_result(row, msg, "#d93025")
+                continue
+            except Exception:
+                self._set_result(row, T("ไม่สำเร็จ"), "#d93025")
+                continue
+
+            self.results.append(st)
+            self.out_files.append(dst)
+            before_all += st["before"]
+            after_all += st["after"]
+            self.table.item(row, 2).setText(cz.human_size(st["after"]))
+            if st["unchanged"]:
+                self._set_result(row, T("เล็กที่สุดแล้ว"), "#6b7280")
+            else:
+                self._set_result(row, T("ลดลง %.0f%%") % st["percent"],
+                                 "#0f9d58")
+
+        self.bar.setValue(1000 if not self._cancel else self.bar.value())
+        self._set_busy(False)
+
+        done = len(self.results)
+        if not done:
+            self.lbl_status.setText(T("ยังไม่ได้บีบอัดไฟล์ใด"))
+            return
+        saved = before_all - after_all
+        pct = saved * 100.0 / before_all if before_all else 0
+        self.lbl_status.setText(
+            T("เสร็จแล้ว %d ไฟล์ • จาก %s เหลือ %s (ประหยัด %s / %.0f%%)")
+            % (done, cz.human_size(before_all), cz.human_size(after_all),
+               cz.human_size(saved), pct))
+        self.btn_open.setVisible(True)
+
+    def _open_folder(self):
+        if not self.out_files:
+            return
+        folder = os.path.dirname(self.out_files[-1])
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def closeEvent(self, e):
+        """Never walk out mid-file: stop the run first, then close."""
+        if self._busy:
+            self._cancel = True
+            e.ignore()
+            return
+        e.accept()
+
+
+def _hline():
+    line = QLabel()
+    line.setFixedHeight(1)
+    line.setStyleSheet("background: #e1e3e6;")
+    return line
 
 
 class ScanEnhanceDialog(QDialog):
