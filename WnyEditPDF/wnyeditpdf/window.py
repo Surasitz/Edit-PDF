@@ -922,21 +922,38 @@ class MainWindow(QMainWindow):
         nothing but a delete. Whatever file is open is put in the list to save
         the usual trip through the file dialog.
         """
-        files = []
+        import tempfile
+        files, names, tmp = [], {}, None
         if self.pdf.is_open() and self.pdf.path:
             if self.pdf.modified:
-                ans = QMessageBox.question(
-                    self, APP_NAME,
-                    self.T("ไฟล์ที่เปิดอยู่ยังมีการแก้ไขที่ไม่ได้บันทึก\n"
-                           "การบีบอัดจะใช้ไฟล์ที่บันทึกไว้บนเครื่อง\n\n"
-                           "ต้องการบันทึกก่อนหรือไม่?"),
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                if ans == QMessageBox.StandardButton.Yes:
-                    self.save_pdf()
-            files.append(self.pdf.path)
+                # Unsaved edits: compress exactly what is on screen. The old
+                # flow asked "save first?" and then dropped the user into the
+                # overwrite dialog - easy to end up compressing the stale
+                # on-disk copy without noticing. A temp snapshot avoids both;
+                # the result is still named <file>_compressed.pdf next to
+                # the original and the original stays untouched.
+                try:
+                    fd, tmp = tempfile.mkstemp(prefix="wny_compress_",
+                                               suffix=".pdf")
+                    os.close(fd)
+                    self.pdf.doc.save(tmp, garbage=1)
+                    files.append(tmp)
+                    names[tmp] = self.pdf.path
+                except Exception:
+                    tmp = None
+                    files.append(self.pdf.path)
+            else:
+                files.append(self.pdf.path)
 
-        dlg = CompressDialog(self, self.T, files)
-        dlg.exec()
+        dlg = CompressDialog(self, self.T, files, names)
+        try:
+            dlg.exec()
+        finally:
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
         if dlg.results:
             before = sum(r["before"] for r in dlg.results)
             after = sum(r["after"] for r in dlg.results)
@@ -1022,13 +1039,23 @@ class MainWindow(QMainWindow):
     # ======================================================
     #  Undo / Redo
     # ======================================================
+    def _drop_stale_selection(self):
+        """Undo/redo reloads the document: a selected span/image still holds
+        its OLD bbox, so the next arrow-key nudge would erase the wrong area
+        and rewrite the text somewhere else. Forget it instead."""
+        self.selection = None
+        self.page_view.sel_span = self.page_view.sel_img = None
+        self.page_view.hover_span = self.page_view.hover_img = None
+
     def undo(self):
         if self.pdf.is_open() and self.pdf.undo():
+            self._drop_stale_selection()
             self.refresh_all()
             self.status("เลิกทำแล้ว ↶")
 
     def redo(self):
         if self.pdf.is_open() and self.pdf.redo():
+            self._drop_stale_selection()
             self.refresh_all()
             self.status("ทำซ้ำแล้ว ↷")
 

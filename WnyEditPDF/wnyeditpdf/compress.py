@@ -318,7 +318,8 @@ def compress_file(src, dst, level="balanced", grayscale=False,
     elif tmp != dst:
         os.replace(tmp, dst)
 
-    tick(total, total)
+    if progress:
+        progress(total, total)    # the file is written: too late to cancel
     return {"before": before, "after": after, "saved": before - after,
             "percent": (before - after) * 100.0 / before if before else 0.0,
             "images": touched, "pages": pages, "unchanged": unchanged}

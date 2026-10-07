@@ -51,6 +51,145 @@ def _unique_png(data):
         return data
 
 
+# clockwise display rotation -> the same turn expressed as a content-stream
+# `cm` in PDF user space (y axis pointing UP)
+_ROT_CM = {90: (0, -1, 1, 0), 180: (-1, 0, 0, -1), 270: (0, 1, -1, 0)}
+
+
+def _pdf_box(doc, page, key):
+    """A page box (/MediaBox, /CropBox ...) in raw PDF coordinates, or None."""
+    try:
+        t, v = doc.xref_get_key(page.xref, key)
+        if t == "array":
+            return fitz.Rect([float(x) for x in v.strip("[]").split()]).normalize()
+    except Exception:
+        pass
+    return None
+
+
+_NUM = re.compile(r"-?(?:\d+\.?\d*|\.\d+)")
+
+
+def _turn_annot_geometry(doc, xref, m):
+    """Apply matrix `m` (PDF coords) to an annotation's /Rect and point lists."""
+    def turn_points(s):
+        nums = [float(x) for x in _NUM.findall(s)]
+        out = []
+        for i in range(0, len(nums) - 1, 2):
+            p = fitz.Point(nums[i], nums[i + 1]) * m
+            out += [p.x, p.y]
+        return " ".join("%g" % v for v in out)
+
+    try:
+        t, v = doc.xref_get_key(xref, "Rect")
+        if t == "array":
+            r = fitz.Rect([float(x) for x in _NUM.findall(v)][:4]).normalize()
+            doc.xref_set_key(xref, "Rect", "[%g %g %g %g]" % tuple((r * m).normalize()))
+        for key in ("QuadPoints", "L", "Vertices", "CL"):
+            t, v = doc.xref_get_key(xref, key)
+            if t == "array":
+                doc.xref_set_key(xref, key, "[" + turn_points(v) + "]")
+        t, v = doc.xref_get_key(xref, "InkList")
+        if t == "array":
+            strokes = re.findall(r"\[([^\[\]]*)\]", v)
+            doc.xref_set_key(xref, "InkList", "[" + " ".join(
+                "[" + turn_points(s) + "]" for s in strokes) + "]")
+    except Exception:
+        pass
+
+
+def bake_page_rotation(page):
+    """Turn a /Rotate page into an upright (Rotate 0) page that LOOKS identical.
+
+    Why: scanners and phone apps (typical for ID-card scans) save a sideways
+    image and set /Rotate 90 instead of rotating the pixels. On such a page
+    the viewer coordinates (what the user clicks) are rotated against the
+    PDF coordinates that insert_text / annotations / get_text use, so every
+    new text came out sideways (vertical) in the wrong spot, highlights and
+    comments landed elsewhere, and clicking existing text missed. Baking the
+    turn into the content stream makes both coordinate systems the same.
+
+    PyMuPDF's own Page.remove_rotation() loses or shifts a /CropBox that
+    differs from the /MediaBox, so this does the maths in raw PDF space.
+    Returns the page (reloaded) - the old page object must not be reused."""
+    rot = page.rotation
+    if rot not in _ROT_CM:
+        return page
+    doc = page.parent
+    # new fitz coords == old viewer coords, so links and form fields (which
+    # live in fitz coordinates) move by rotation_matrix. Read them BEFORE the
+    # boxes change.
+    to_view = fitz.Matrix(page.rotation_matrix)
+    annots = [a.xref for a in page.annots() or []]
+    # fixed-size icons (sticky notes) get re-anchored by MuPDF on reload;
+    # remember where they must end up
+    icons = {a.xref: a.rect * to_view for a in page.annots() or []
+             if a.type[0] == fitz.PDF_ANNOT_TEXT}
+    links = []
+    for lk in page.get_links():
+        lk = dict(lk)
+        lk["from"] = fitz.Rect(lk["from"]) * to_view
+        links.append(lk)
+    widgets = []
+    for w in page.widgets() or []:
+        widgets.append((w.xref, w.rect * to_view))
+
+    mb = _pdf_box(doc, page, "MediaBox") or fitz.Rect(page.mediabox)
+    a, b, c, d = _ROT_CM[rot]
+    t = fitz.Matrix(a, b, c, d, 0, 0)
+    nm = (mb * t).normalize()
+    t = t * fitz.Matrix(1, 0, 0, 1, -nm.x0, -nm.y0)     # keep the origin at 0,0
+
+    fmt = "[%g %g %g %g]"
+    # annotations: turn their geometry (raw PDF coords) with the same matrix.
+    # set_rect() is not enough - highlights / ink / lines are defined by
+    # point lists, and some types refuse set_rect() altogether.
+    for xref in annots:
+        _turn_annot_geometry(doc, xref, t)
+    doc.xref_set_key(page.xref, "MediaBox", fmt % tuple((mb * t).normalize()))
+    for key in ("CropBox", "TrimBox", "BleedBox", "ArtBox"):
+        box = _pdf_box(doc, page, key)
+        if box is not None:
+            doc.xref_set_key(page.xref, key, fmt % tuple((box * t).normalize()))
+    doc.xref_set_key(page.xref, "Rotate", "0")
+    # wrap the old content in q <turn> cm ... Q so later additions are upright
+    cm = ("q %g %g %g %g %g %g cm\n" % tuple(t)).encode()
+    fitz.TOOLS._insert_contents(page, cm, False)
+    fitz.TOOLS._insert_contents(page, b"\nQ\n", True)
+
+    page = doc.reload_page(page)
+    redraw = (fitz.PDF_ANNOT_HIGHLIGHT, fitz.PDF_ANNOT_UNDERLINE,
+              fitz.PDF_ANNOT_STRIKE_OUT, fitz.PDF_ANNOT_SQUIGGLY,
+              fitz.PDF_ANNOT_INK, fitz.PDF_ANNOT_LINE, fitz.PDF_ANNOT_POLYGON,
+              fitz.PDF_ANNOT_POLY_LINE, fitz.PDF_ANNOT_SQUARE,
+              fitz.PDF_ANNOT_CIRCLE)
+    for xref in annots:
+        try:                       # redraw the appearance from the new geometry
+            annot = page.load_annot(xref)
+            if annot.type[0] in redraw:
+                annot.update()
+            elif xref in icons:
+                annot.set_rect(icons[xref])
+        except Exception:
+            pass
+    for lk in links:
+        try:
+            page.delete_link(lk)
+            page.insert_link(lk)
+        except Exception:
+            pass
+    if widgets:
+        want = dict(widgets)
+        for w in page.widgets() or []:
+            if w.xref in want:
+                try:
+                    w.rect = want[w.xref]
+                    w.update()
+                except Exception:
+                    pass
+    return page
+
+
 def _qimage_to_png(img):
     """Encode a QImage as PNG bytes."""
     from PyQt6.QtCore import QBuffer, QIODevice
@@ -264,11 +403,26 @@ class PdfDocument:
         self._cleanup_temp_fonts()
         self.doc = doc
         self.path = path
+        self._bake_rotations()
         self.modified = False
         self._undo.clear()
         self._redo.clear()
         self._span_cache.clear()
         return None
+
+    def _bake_rotations(self):
+        """Make every /Rotate page upright in content (see bake_page_rotation)
+        so viewer clicks, inserted text and extracted spans share one
+        coordinate system. A no-op for pages that are not rotated."""
+        if not self.doc or not self.doc.is_pdf:
+            return
+        for pno in range(self.doc.page_count):
+            try:
+                if self.doc[pno].rotation:
+                    bake_page_rotation(self.doc[pno])
+            except Exception:
+                pass                 # never block opening a file over this
+        self._span_cache.clear()
 
     # ================= Undo / Redo =================
     def _snapshot(self):
@@ -1191,7 +1345,8 @@ class PdfDocument:
                            bold=False, italic=False, skip_faux_fonts=(),
                            max_width=None):
         """Write text at view_origin using the first font in the chain that works.
-        (PyMuPDF insert_text takes viewer coords and handles page rotation itself.)
+        (insert_text works in UNROTATED page coords and does not turn the text
+        for /Rotate pages - which is why open() bakes rotation away first.)
 
         `max_width`: when given, and the chosen font would draw the text wider
         than this, condense HORIZONTALLY with a scale matrix instead of
@@ -2306,6 +2461,7 @@ class PdfDocument:
         self._snapshot()
         page = self.doc[pno]
         page.set_rotation((page.rotation + deg) % 360)
+        bake_page_rotation(page)
         self._touch()
 
     def delete_page(self, pno):
@@ -2356,6 +2512,7 @@ class PdfDocument:
         other = fitz.open(path)
         self.doc.insert_pdf(other)
         other.close()
+        self._bake_rotations()
         self._touch()
 
     @staticmethod
@@ -2408,6 +2565,7 @@ class PdfDocument:
             insert_at += (j - i + 1)
             i = j + 1
         other.close()
+        self._bake_rotations()
         self._touch()
         return len(seq)
 

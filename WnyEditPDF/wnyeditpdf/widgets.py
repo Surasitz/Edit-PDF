@@ -2,6 +2,8 @@
 """WnyEditPDF widgets: dialogs, page view, thumbnail strip and search bar."""
 
 import os
+import subprocess
+import sys
 
 import fitz
 
@@ -599,9 +601,10 @@ class WordExportDialog(QDialog):
     """Pick how a PDF should be turned into a Word file.
 
     The two modes are a genuine trade-off rather than a quality setting, so the
-    user has to see both: frames reproduce the page exactly but are fiddly to
-    retype in, flowing paragraphs are pleasant to edit but will not hold a
-    complicated form together. Either way the words themselves are identical."""
+    user has to see both: flowing paragraphs are what people expect a Word file
+    to be, so they are the default; frames reproduce the page exactly but leave
+    one box per line to retype in. Either way the words themselves are
+    identical."""
 
     def __init__(self, parent=None, tr=None, page_count=1, cur_page=1):
         super().__init__(parent)
@@ -616,18 +619,12 @@ class WordExportDialog(QDialog):
         head.setStyleSheet("font-weight: 600; font-size: 14px;")
         lay.addWidget(head)
 
-        self.rb_layout = QRadioButton(T("คงหน้าตาเดิมทุกอย่าง (แนะนำ)"))
-        self.rb_layout.setChecked(True)
-        lay.addWidget(self.rb_layout)
-        hint1 = QLabel(T("ตัวอักษร ตำแหน่ง ตาราง และฟอร์ม อยู่ตรงเดิมเป๊ะ\n"
-                         "เหมาะกับหนังสือราชการ แบบฟอร์ม ใบเสร็จ ที่ต้องเหมือนต้นฉบับ"))
-        hint1.setStyleSheet("color: #6b7280; margin-left: 22px;")
-        lay.addWidget(hint1)
-
-        self.rb_flow = QRadioButton(T("พิมพ์แก้ต่อได้ง่าย (ข้อความไหลต่อกัน)"))
+        self.rb_flow = QRadioButton(
+            T("พิมพ์แก้ต่อได้ (ข้อความไหลต่อกันแบบ Word ปกติ) (แนะนำ)"))
+        self.rb_flow.setChecked(True)
         lay.addWidget(self.rb_flow)
-        hint2 = QLabel(T("ได้ย่อหน้าปกติแบบที่พิมพ์เองใน Word แก้ไขสะดวกกว่า\n"
-                         "แต่หน้าที่มีหลายคอลัมน์หรือฟอร์มซับซ้อนอาจเลื่อนได้"))
+        hint2 = QLabel(T("ได้ย่อหน้าจริงแบบที่พิมพ์เองใน Word ข้อความไหลข้ามหน้าได้\n"
+                         "เลขหน้าย้ายไปอยู่หัวกระดาษ — หน้าหลายคอลัมน์อาจเลื่อนได้"))
         hint2.setStyleSheet("color: #6b7280; margin-left: 22px;")
         lay.addWidget(hint2)
 
@@ -636,7 +633,13 @@ class WordExportDialog(QDialog):
         self.chk_tables.setStyleSheet("margin-left: 22px;")
         lay.addWidget(self.chk_tables)
         self.rb_flow.toggled.connect(self.chk_tables.setEnabled)
-        self.chk_tables.setEnabled(False)
+
+        self.rb_layout = QRadioButton(T("ล็อกตำแหน่งเหมือนต้นฉบับเป๊ะ"))
+        lay.addWidget(self.rb_layout)
+        hint1 = QLabel(T("ทุกบรรทัดถูกล็อกไว้ในกรอบตรงตำแหน่งเดิม แก้ได้ทีละบรรทัด\n"
+                         "เหมาะกับแบบฟอร์ม ใบเสร็จ ที่ต้องเหมือนต้นฉบับ ไม่ได้จะพิมพ์ต่อ"))
+        hint1.setStyleSheet("color: #6b7280; margin-left: 22px;")
+        lay.addWidget(hint1)
 
         lay.addSpacing(6)
         row = QHBoxLayout()
@@ -647,7 +650,7 @@ class WordExportDialog(QDialog):
         row.addWidget(self.pages, 1)
         lay.addLayout(row)
 
-        note = QLabel(T("ฟอนต์และขนาดตัวอักษรเดิมถูกเก็บไว้ครบ รวมภาษาไทย\n"
+        note = QLabel(T("ฝังฟอนต์ไทยไว้ในไฟล์ Word เปิดเครื่องอื่นตัวอักษรไม่เพี้ยน\n"
                         "หน้าที่เป็นรูปสแกน จะถูกใส่เป็นรูปภาพให้แทน"))
         note.setStyleSheet("color: #6b7280;")
         lay.addWidget(note)
@@ -679,7 +682,7 @@ class CompressDialog(QDialog):
     ``*_compressed.pdf`` next to the original, or to a folder the user picks.
     """
 
-    def __init__(self, parent=None, tr=None, files=None):
+    def __init__(self, parent=None, tr=None, files=None, names=None):
         super().__init__(parent)
         T = tr or (lambda s: s)
         self._T = T
@@ -688,6 +691,12 @@ class CompressDialog(QDialog):
         self.paths = []          # row index -> source path
         self.results = []        # stats dicts, filled in as the run goes
         self.out_files = []      # what we actually wrote
+        self.row_out = {}        # table row -> file written for it
+        # source path -> the path the result is NAMED after. Used for the
+        # document open in the editor with unsaved edits: we compress a temp
+        # copy of what is on screen, but the user expects
+        # "<their file>_compressed.pdf" next to their file, not a temp name.
+        self.name_for = dict(names or {})
 
         self.setWindowTitle(T("บีบอัด PDF (ลดขนาดไฟล์)"))
         self.setMinimumSize(760, 600)
@@ -698,16 +707,22 @@ class CompressDialog(QDialog):
         head = QLabel(T("ลดขนาดไฟล์ PDF ได้ทีละหลายไฟล์"))
         head.setStyleSheet("font-weight: 600; font-size: 14px;")
         lay.addWidget(head)
-        sub = QLabel(T("ลากไฟล์ PDF มาวางตรงนี้ หรือกดปุ่ม 'เพิ่มไฟล์'\n"
-                       "ทุกอย่างทำในเครื่องคุณ ไม่มีการอัปโหลดไฟล์ออกไปไหน "
-                       "และไฟล์ต้นฉบับไม่ถูกแก้"))
+        sub = QLabel(T("① ลากไฟล์ PDF มาวาง หรือกด 'เพิ่มไฟล์'   "
+                       "② เลือกระดับ   ③ กด 'บีบอัดและบันทึก'\n"
+                       "โปรแกรมจะบันทึกเป็นไฟล์ใหม่ให้ทันที ไม่ต้องกดบันทึกเองอีก "
+                       "— ไฟล์ต้นฉบับไม่ถูกแก้ และไม่มีการอัปโหลดไฟล์ออกไปไหน"))
         sub.setStyleSheet("color: #6b7280;")
+        sub.setWordWrap(True)
         lay.addWidget(sub)
 
         # ---------------- the work list ----------------
-        self.table = QTableWidget(0, 4)
+        self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels([
-            T("ไฟล์"), T("ขนาดเดิม"), T("ขนาดใหม่"), T("ผลลัพธ์")])
+            T("ไฟล์"), T("ขนาดเดิม"), T("ขนาดใหม่"), T("ผลลัพธ์"),
+            T("บันทึกเป็น")])
+        self.table.setToolTip(
+            T("ดับเบิลคลิกแถวที่เสร็จแล้ว เพื่อเปิดโฟลเดอร์ที่บันทึกไฟล์ไว้"))
+        self.table.cellDoubleClicked.connect(self._show_output)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
@@ -716,7 +731,7 @@ class CompressDialog(QDialog):
         self.table.viewport().setAcceptDrops(False)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for c in (1, 2, 3):
+        for c in (1, 2, 3, 4):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
         lay.addWidget(self.table, 1)
 
@@ -772,6 +787,10 @@ class CompressDialog(QDialog):
         lay.addWidget(self.chk_fonts)
 
         # ---------------- where the results go ----------------
+        lay.addWidget(_hline())
+        where = QLabel(T("บันทึกไฟล์ที่บีบอัดแล้วไว้ที่:"))
+        where.setStyleSheet("font-weight: 600;")
+        lay.addWidget(where)
         out_row = QHBoxLayout()
         self.rb_same = QRadioButton(T("บันทึกไว้โฟลเดอร์เดียวกับไฟล์ต้นฉบับ"))
         self.rb_same.setChecked(True)
@@ -792,6 +811,16 @@ class CompressDialog(QDialog):
         out_row.addWidget(self.out_dir, 1)
         out_row.addWidget(self.btn_dir)
         lay.addLayout(out_row)
+        # live preview of the exact file name that will be written, so the
+        # user knows where to look BEFORE pressing the button
+        self.lbl_dest = QLabel()
+        self.lbl_dest.setStyleSheet("color: #1473e6; margin-left: 4px;")
+        self.lbl_dest.setWordWrap(True)
+        self.lbl_dest.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self.lbl_dest)
+        self.rb_same.toggled.connect(self._update_dest)
+        self.out_dir.textChanged.connect(self._update_dest)
 
         # ---------------- progress + buttons ----------------
         self.bar = QProgressBar()
@@ -814,7 +843,7 @@ class CompressDialog(QDialog):
         self.btn_close = QPushButton(T("ปิด"))
         self.btn_close.setProperty("flat", True)
         self.btn_close.clicked.connect(self.close)
-        self.btn_go = QPushButton(T("บีบอัดเลย"))
+        self.btn_go = QPushButton(T("บีบอัดและบันทึก"))
         self.btn_go.clicked.connect(self._go)
         bb.addWidget(self.btn_close)
         bb.addWidget(self.btn_go)
@@ -838,13 +867,18 @@ class CompressDialog(QDialog):
             have.add(key)
             r = self.table.rowCount()
             self.table.insertRow(r)
-            name = QTableWidgetItem(os.path.basename(p))
-            name.setToolTip(p)
+            shown = self.name_for.get(p, p)
+            label = os.path.basename(shown)
+            if shown != p:
+                label += self._T("  (ฉบับที่แก้ล่าสุด)")
+            name = QTableWidgetItem(label)
+            name.setToolTip(shown)
             self.table.setItem(r, 0, name)
             self.table.setItem(r, 1, QTableWidgetItem(
                 human_size(os.path.getsize(p))))
             self.table.setItem(r, 2, QTableWidgetItem("-"))
             self.table.setItem(r, 3, QTableWidgetItem(self._T("รอคิว")))
+            self.table.setItem(r, 4, QTableWidgetItem(""))
             self.paths.append(p)
             added += 1
         if added:
@@ -858,26 +892,33 @@ class CompressDialog(QDialog):
         self.add_files(paths)
 
     def _remove_selected(self):
-        for r in sorted({i.row() for i in self.table.selectedIndexes()},
-                        reverse=True):
+        rows = sorted({i.row() for i in self.table.selectedIndexes()},
+                      reverse=True)
+        for r in rows:
             self.table.removeRow(r)
             del self.paths[r]
+        if rows:
+            # row numbers shifted - the per-row output map no longer lines up
+            self.row_out = {}
         self._refresh_total()
 
     def _clear(self):
         self.table.setRowCount(0)
         self.paths = []
+        self.row_out = {}
         self._refresh_total()
 
     def _reset_results(self):
         """A new run starts from a clean slate of result cells."""
         self.results = []
         self.out_files = []
+        self.row_out = {}
         self.btn_open.setVisible(False)
         self.bar.setValue(0)
         for r in range(self.table.rowCount()):
             self.table.item(r, 2).setText("-")
             self._set_result(r, self._T("รอคิว"), "#6b7280")
+            self.table.setItem(r, 4, QTableWidgetItem(""))
 
     def _refresh_total(self):
         from .compress import human_size
@@ -886,6 +927,25 @@ class CompressDialog(QDialog):
         self.lbl_total.setText(
             self._T("รวม %d ไฟล์ • %s") % (len(self.paths), human_size(total)))
         self.btn_go.setEnabled(bool(self.paths))
+        self._update_dest()
+
+    def _update_dest(self, *_):
+        """Tell the user exactly where the result will be saved."""
+        from .compress import output_path
+        T = self._T
+        if not hasattr(self, "lbl_dest"):
+            return
+        if self.rb_other.isChecked() and not self.out_dir.text().strip():
+            self.lbl_dest.setText(T("⚠ ยังไม่ได้เลือกโฟลเดอร์ปลายทาง"))
+            return
+        if not self.paths:
+            self.lbl_dest.setText(T("ไฟล์ใหม่จะชื่อ  ชื่อเดิม_compressed.pdf"))
+            return
+        first = self.name_for.get(self.paths[0], self.paths[0])
+        dst = output_path(first, self._target_dir())
+        more = (T("  (ไฟล์อื่นตั้งชื่อแบบเดียวกัน)")
+                if len(self.paths) > 1 else "")
+        self.lbl_dest.setText(T("➜ จะบันทึกเป็น: %s") % dst + more)
 
     def _set_result(self, row, text, color):
         it = QTableWidgetItem(text)
@@ -949,6 +1009,15 @@ class CompressDialog(QDialog):
             return
         if not self.paths:
             return
+        if self.rb_other.isChecked() and not self.out_dir.text().strip():
+            self._pick_dir()
+            if not self._target_dir():
+                return
+        out_dir = self._target_dir()
+        if out_dir and not os.path.isdir(out_dir):
+            QMessageBox.warning(self, self._T("บีบอัด PDF"),
+                                self._T("ไม่พบโฟลเดอร์ปลายทาง:\n%s") % out_dir)
+            return
         self._run()
 
     def _set_busy(self, busy):
@@ -961,7 +1030,8 @@ class CompressDialog(QDialog):
         for rb in self.levels.values():
             rb.setEnabled(not busy)
         self.btn_dir.setEnabled(not busy and self.rb_other.isChecked())
-        self.btn_go.setText(self._T("หยุด") if busy else self._T("บีบอัดเลย"))
+        self.btn_go.setText(self._T("หยุด") if busy
+                            else self._T("บีบอัดและบันทึก"))
 
     def _run(self):
         from . import compress as cz
@@ -989,29 +1059,40 @@ class CompressDialog(QDialog):
                 QApplication.processEvents()
                 return not self._cancel
 
+            if not os.path.isfile(src):
+                self._set_result(row, T("ไม่พบไฟล์ (ถูกย้าย/ลบ?)"), "#d93025")
+                continue
             try:
-                dst = cz.output_path(src, out_dir)
+                dst = cz.output_path(self.name_for.get(src, src), out_dir)
                 st = cz.compress_file(src, dst, level=level, grayscale=gray,
                                       subset_fonts=fonts, progress=tick)
             except cz.CompressCancelled:
                 self._set_result(row, T("ยกเลิกแล้ว"), "#6b7280")
                 break
-            except cz.CompressError as e:
-                msg = (T("ไฟล์มีรหัสผ่าน") if "locked" in str(e)
-                       else T("ไม่สำเร็จ"))
+            except Exception as e:
+                err = str(e)
+                if "locked" in err:
+                    msg = T("ไฟล์มีรหัสผ่าน")
+                elif isinstance(e, PermissionError) or "ermission" in err:
+                    msg = T("บันทึกไม่ได้ (โฟลเดอร์ห้ามเขียน หรือไฟล์เปิดค้างอยู่)")
+                else:
+                    msg = T("ไม่สำเร็จ")
                 self._set_result(row, msg, "#d93025")
-                continue
-            except Exception:
-                self._set_result(row, T("ไม่สำเร็จ"), "#d93025")
+                self.table.item(row, 3).setToolTip(err)
                 continue
 
             self.results.append(st)
             self.out_files.append(dst)
+            self.row_out[row] = dst
+            out_item = QTableWidgetItem(os.path.basename(dst))
+            out_item.setToolTip(dst)
+            self.table.setItem(row, 4, out_item)
             before_all += st["before"]
             after_all += st["after"]
             self.table.item(row, 2).setText(cz.human_size(st["after"]))
             if st["unchanged"]:
-                self._set_result(row, T("เล็กที่สุดแล้ว"), "#6b7280")
+                self._set_result(row, T("เล็กที่สุดแล้ว (บันทึกสำเนาเดิมให้)"),
+                                 "#6b7280")
             else:
                 self._set_result(row, T("ลดลง %.0f%%") % st["percent"],
                                  "#0f9d58")
@@ -1025,17 +1106,60 @@ class CompressDialog(QDialog):
             return
         saved = before_all - after_all
         pct = saved * 100.0 / before_all if before_all else 0
-        self.lbl_status.setText(
-            T("เสร็จแล้ว %d ไฟล์ • จาก %s เหลือ %s (ประหยัด %s / %.0f%%)")
-            % (done, cz.human_size(before_all), cz.human_size(after_all),
-               cz.human_size(saved), pct))
+        summary = (T("เสร็จแล้ว %d ไฟล์ • จาก %s เหลือ %s (ประหยัด %s / %.0f%%)")
+                   % (done, cz.human_size(before_all), cz.human_size(after_all),
+                      cz.human_size(saved), pct))
+        self.lbl_status.setText(summary)
         self.btn_open.setVisible(True)
 
+        # say plainly that the files are ALREADY saved, and where
+        folders = sorted({os.path.dirname(f) for f in self.out_files})
+        names = [os.path.basename(f) for f in self.out_files[:6]]
+        if len(self.out_files) > 6:
+            names.append("…")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(T("บีบอัดเสร็จแล้ว"))
+        box.setText(summary + "\n\n"
+                    + T("✓ บันทึกไฟล์ใหม่เรียบร้อยแล้ว ไม่ต้องกดบันทึกอีก"))
+        box.setInformativeText(T("ไฟล์อยู่ที่:") + "\n" + "\n".join(folders)
+                               + "\n\n" + "\n".join(names))
+        open_btn = box.addButton(T("📂 เปิดโฟลเดอร์"),
+                                 QMessageBox.ButtonRole.ActionRole)
+        box.addButton(T("ตกลง"), QMessageBox.ButtonRole.AcceptRole)
+        if not getattr(self, "quiet", False):
+            box.exec()
+            if box.clickedButton() is open_btn:
+                self._open_folder()
+
+    def _reveal(self, path):
+        """Open the folder holding `path`, with the file selected on Windows."""
+        if sys.platform.startswith("win") and os.path.isfile(path):
+            try:
+                subprocess.Popen(["explorer", "/select,",
+                                  os.path.normpath(path)])
+                return
+            except Exception:
+                pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+
     def _open_folder(self):
-        if not self.out_files:
+        if self.out_files:
+            self._reveal(self.out_files[-1])
+
+    def _show_output(self, row, _col):
+        path = self.row_out.get(row)
+        if path and os.path.exists(path):
+            self._reveal(path)
+
+    def reject(self):
+        """Esc: QDialog.reject() bypasses closeEvent and would end exec()
+        while a file is still being written. Stop the run instead."""
+        if self._busy:
+            self._cancel = True
+            self.lbl_status.setText(self._T("กำลังหยุด..."))
             return
-        folder = os.path.dirname(self.out_files[-1])
-        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        super().reject()
 
     def closeEvent(self, e):
         """Never walk out mid-file: stop the run first, then close."""

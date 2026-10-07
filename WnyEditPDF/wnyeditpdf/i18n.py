@@ -81,24 +81,25 @@ EN = {
     # ----- PDF -> Word -----
     "แปลง PDF เป็น Word": "Convert PDF to Word",
     "เลือกรูปแบบไฟล์ Word ที่ต้องการ": "Choose the kind of Word file you want",
-    "คงหน้าตาเดิมทุกอย่าง (แนะนำ)": "Keep the original look (recommended)",
-    "ตัวอักษร ตำแหน่ง ตาราง และฟอร์ม อยู่ตรงเดิมเป๊ะ\n"
-    "เหมาะกับหนังสือราชการ แบบฟอร์ม ใบเสร็จ ที่ต้องเหมือนต้นฉบับ":
-        "Text, positions, tables and forms land exactly where they were.\n"
-        "Best for official letters, forms and receipts that must match the original.",
-    "พิมพ์แก้ต่อได้ง่าย (ข้อความไหลต่อกัน)": "Easy to keep writing in (flowing text)",
-    "ได้ย่อหน้าปกติแบบที่พิมพ์เองใน Word แก้ไขสะดวกกว่า\n"
-    "แต่หน้าที่มีหลายคอลัมน์หรือฟอร์มซับซ้อนอาจเลื่อนได้":
-        "Ordinary paragraphs like ones you would type yourself, much easier to edit,\n"
-        "but multi-column pages and complicated forms may shift.",
+    "พิมพ์แก้ต่อได้ (ข้อความไหลต่อกันแบบ Word ปกติ) (แนะนำ)":
+        "Editable (text flows like a normal Word file) (recommended)",
+    "ได้ย่อหน้าจริงแบบที่พิมพ์เองใน Word ข้อความไหลข้ามหน้าได้\n"
+    "เลขหน้าย้ายไปอยู่หัวกระดาษ — หน้าหลายคอลัมน์อาจเลื่อนได้":
+        "Real paragraphs like ones you would type yourself, flowing across pages.\n"
+        "Page numbers move into the header - multi-column pages may shift.",
+    "ล็อกตำแหน่งเหมือนต้นฉบับเป๊ะ": "Pin everything where it was",
+    "ทุกบรรทัดถูกล็อกไว้ในกรอบตรงตำแหน่งเดิม แก้ได้ทีละบรรทัด\n"
+    "เหมาะกับแบบฟอร์ม ใบเสร็จ ที่ต้องเหมือนต้นฉบับ ไม่ได้จะพิมพ์ต่อ":
+        "Every line is pinned in a frame at its old position, edited line by line.\n"
+        "For forms and receipts that must match the original, not for writing in.",
     "แปลงตารางที่มีเส้นให้เป็นตารางของ Word":
         "Turn ruled tables into real Word tables",
     "หน้าที่จะแปลง:": "Pages to convert:",
     "เว้นว่าง = ทั้งไฟล์ (%d หน้า) — หรือระบุ เช่น 1-3,5":
         "Blank = whole file (%d pages) — or list them, e.g. 1-3,5",
-    "ฟอนต์และขนาดตัวอักษรเดิมถูกเก็บไว้ครบ รวมภาษาไทย\n"
+    "ฝังฟอนต์ไทยไว้ในไฟล์ Word เปิดเครื่องอื่นตัวอักษรไม่เพี้ยน\n"
     "หน้าที่เป็นรูปสแกน จะถูกใส่เป็นรูปภาพให้แทน":
-        "The original fonts and sizes are kept, Thai included.\n"
+        "Thai fonts are embedded in the Word file, so it looks right on any PC.\n"
         "Scanned pages come across as pictures.",
     "แปลงเลย": "Convert",
     "บันทึกเป็นไฟล์ Word": "Save as a Word file",

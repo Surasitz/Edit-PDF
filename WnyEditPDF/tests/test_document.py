@@ -13,7 +13,8 @@ import zipfile
 import fitz
 import pytest
 
-from conftest import find_span, refind
+from conftest import bundled_fonts, find_span, refind
+from wnyeditpdf.document import PdfDocument
 
 
 # ---------------------------------------------------------------- move: font
@@ -310,3 +311,96 @@ class TestSavePages:
     def test_save_pages_rejects_empty(self, doc, tmp_path):
         with pytest.raises(ValueError):
             doc.save_pages([], str(tmp_path / "x.pdf"))
+
+
+# ---------------------------------------------------------------- rotated pages
+def _rotated_scan(tmp_path, rot, crop=None):
+    """A scanner-style page: a sideways image page saved with /Rotate."""
+    path = str(tmp_path / f"scan{rot}.pdf")
+    pdf = fitz.open()
+    page = pdf.new_page(width=243, height=153)      # ID-card size, landscape
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 60, 40))
+    pix.clear_with(200)
+    page.insert_image(page.rect, pixmap=pix)
+    page.insert_text((20, 40), "scanned label", fontsize=12)
+    if crop:
+        pdf.xref_set_key(page.xref, "CropBox", crop)
+    page.set_rotation(rot)
+    pdf.save(path)
+    pdf.close()
+    return path
+
+
+def _upright_lines(page):
+    """(direction, bbox) of every text line as the user sees it."""
+    out = []
+    for b in page.get_text("dict")["blocks"]:
+        for ln in b.get("lines", []):
+            out.append((ln["dir"], fitz.Rect(ln["bbox"]),
+                        "".join(s["text"] for s in ln["spans"])))
+    return out
+
+
+class TestRotatedPages:
+    @pytest.mark.parametrize("rot", [90, 180, 270])
+    def test_added_text_is_horizontal_where_clicked(self, tmp_path, rot):
+        """Bug: on a scanned ID card saved with /Rotate, new text came out
+        vertical (sideways) and far from the click point."""
+        d = PdfDocument()
+        assert d.open(_rotated_scan(tmp_path, rot)) is None
+        d.bundled_fonts = bundled_fonts()
+        d.default_thai_font = d.bundled_fonts.get("THSarabunNew")
+        view = d.page_rect(0)
+        before = d.doc[0].get_pixmap()
+        d.add_text(0, fitz.Point(30, 60), "ทดสอบ", 16, (0, 0, 0),
+                   d.default_thai_font)
+        page = d.doc[0]
+        assert page.rect == view                     # page looks the same size
+        added = [ln for ln in _upright_lines(page) if "scanned" not in ln[2]]
+        assert added
+        direction, bbox, _ = added[0]
+        assert direction == pytest.approx((1, 0), abs=1e-3)
+        assert bbox.x0 == pytest.approx(30, abs=3)
+        assert bbox.y1 == pytest.approx(60, abs=8)
+        assert before.width == page.get_pixmap().width
+        d.close()
+
+    @pytest.mark.parametrize("rot", [90, 180, 270])
+    def test_opening_keeps_appearance(self, tmp_path, rot):
+        path = _rotated_scan(tmp_path, rot, crop="[10 5 230 150]")
+        with fitz.open(path) as raw:
+            want = raw[0].get_pixmap().samples
+            label = [fitz.Rect(ln[1]) * raw[0].rotation_matrix
+                     for ln in _upright_lines(raw[0])]
+        d = PdfDocument()
+        assert d.open(path) is None
+        assert d.doc[0].rotation == 0
+        assert d.doc[0].get_pixmap().samples == want
+        # existing text is reported in the coordinates the user clicks in
+        got = [ln[1] for ln in _upright_lines(d.doc[0])]
+        assert len(got) == len(label)
+        for a, b in zip(got, label):
+            assert a.x0 == pytest.approx(b.x0, abs=1)
+            assert a.y0 == pytest.approx(b.y0, abs=1)
+        d.close()
+
+    def test_rotate_page_then_add_text(self, tmp_path):
+        d = PdfDocument()
+        assert d.open(_rotated_scan(tmp_path, 0)) is None
+        d.default_thai_font = bundled_fonts().get("THSarabunNew")
+        d.rotate_page(0, 90)
+        assert d.page_rect(0).width == pytest.approx(153)
+        d.add_text(0, fitz.Point(20, 30), "abc", 12, (0, 0, 0), None)
+        new = [ln for ln in _upright_lines(d.doc[0]) if ln[2] == "abc"]
+        assert new and new[0][0] == pytest.approx((1, 0), abs=1e-3)
+        d.close()
+
+    def test_highlight_lands_where_dragged(self, tmp_path):
+        d = PdfDocument()
+        assert d.open(_rotated_scan(tmp_path, 90)) is None
+        d.highlight(0, fitz.Rect(10, 10, 100, 30))
+        page = d.doc[0]                  # keep the page alive while reading
+        r = next(iter(page.annots())).rect
+        assert r.x0 == pytest.approx(10, abs=6)
+        assert r.y1 == pytest.approx(30, abs=6)
+        d.close()
