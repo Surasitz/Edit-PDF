@@ -1,8 +1,10 @@
 # WnyEditPDF
 
 A free, offline desktop **PDF reader & editor** with first-class Thai-language
-support, built with Python + PyQt6 + PyMuPDF. Everything runs locally on your
-machine — no internet, no accounts, no limits, no data ever leaves your computer.
+support, built with Python + PyQt6 + PyMuPDF, with the open-source
+[PdfCraft](https://github.com/storytold/pdfcraft) engine (Rust) built in for
+whole-document tools. Everything runs locally on your machine — no internet,
+no accounts, no limits, no data ever leaves your computer.
 
 โปรแกรมอ่านและแก้ไข PDF บนเดสก์ท็อป ฟรี ใช้งานออฟไลน์ 100% รองรับภาษาไทยเต็มรูปแบบ
 ทำงานบนเครื่องคุณล้วนๆ ไม่ต่อเน็ต ไม่ต้องสมัคร ไม่มีลิมิต ข้อมูลไม่ออกจากเครื่อง
@@ -48,7 +50,36 @@ machine — no internet, no accounts, no limits, no data ever leaves your comput
   cannot be improved comes back untouched rather than broken. And it is all
   local: the documents you would never be allowed to upload to a web
   "compress PDF" service never leave the machine.
-- **Export** to PDF, PNG, JPG or plain text; **AES-256 password** protection.
+- **Digital signatures with a certificate** — sign with a .p12/.pfx digital ID
+  or one in the Windows certificate store (smart cards and USB tokens too),
+  PAdES SHA-256, with an optional Thai "digitally signed by" box and
+  certification (no changes allowed). **Validate** the signatures in any file:
+  was it changed after signing, and is the signer trusted? Create a personal
+  digital ID in a few clicks.
+- **Document menu** — properties (title, author, PDF version, embedded fonts,
+  security), bookmarks editor, **compare two versions** (report PDF or the
+  differences marked as comments), **PDF/A-2b** verify and convert for
+  archiving, accessibility checker, **remove hidden information** before a
+  file leaves your organisation, flatten comments/forms, and **automatic form
+  field detection** that turns the blanks of a printed form into fillable
+  fields. Thai values typed into form fields are drawn with a real Thai font.
+- **Combine** PDFs, images and text files into one PDF with a bookmark per
+  file; **split** every N pages, at bookmarks or by size; export the embedded
+  images; **crop** pages; **print**; clear / export / import form data (XFDF,
+  FDF, CSV, XML); turn web addresses into links.
+- **Export** to PDF, PNG, JPG or plain text; **AES-256 password** protection
+  with optional restrictions (no printing / copying / editing).
+- **An Acrobat-style workspace**: mode tabs (All tools, Read, Edit, Convert,
+  E-Sign), an All-tools panel with 86 tools in 14 colour-coded families, a
+  floating tool rail beside the page, page thumbnails on the right, a
+  distraction-free Read mode, and **Ctrl+K** to search every command in Thai
+  or English. A welcome screen shows recent files and the popular tools.
+- More tools from the PdfCraft catalogue: header and footer with page numbers,
+  dates and **Bates numbering**, coloured-paper backgrounds, blank / clipboard
+  documents, duplicate and replace pages, page labels (i ii / 1 2 3), underline
+  / strike-out / squiggly markup, rectangles, ovals and lines, a comment list,
+  **find-and-redact** across the whole file, redacting whole pages, adding form
+  fields by hand, removing a password, and HTML export with intact Thai.
 - Nudge the selected text/image by **1 pt with the arrow keys** (Shift = 5 pt).
 - Full **Undo/Redo**, and a **Thai / English** UI you can switch with the flag
   button (top-right).
@@ -56,6 +87,7 @@ machine — no internet, no accounts, no limits, no data ever leaves your comput
 ### Requirements
 - Python 3.10+
 - `pip install -r requirements.txt` (PyQt6, PyMuPDF)
+- To build the engine: Rust (https://rustup.rs) + Visual Studio Build Tools (C++)
 
 ### Run
 ```bash
@@ -65,16 +97,12 @@ python main.py
 
 ### Build a standalone .exe (Windows)
 ```bat
-pip install pyinstaller
-pyinstaller --onefile --windowed --name WnyEditPDF ^
-    --icon wnyeditpdf/assets/logo.ico ^
-    --add-data "fonts;fonts" ^
-    --add-data "wnyeditpdf/assets;wnyeditpdf/assets" ^
-    --hidden-import qrcode ^
-    main.py
+build.bat
 ```
-On macOS/Linux replace `;` with `:` and `^` with `\`. The result is
-`dist/WnyEditPDF.exe`, which you can copy to any machine. (See `BUILD.md`.)
+It builds the PdfCraft engine, then a single `dist/WnyEditPDF.exe` with the
+engine, fonts and everything else inside — copy it to any machine. Without a
+built engine the app still runs; only the engine-backed tools say it is
+missing. (See `BUILD.md`.)
 
 > Windows SmartScreen may warn that the publisher is unknown because the binary
 > is not code-signed. It is safe — click **More info → Run anyway**.
@@ -85,6 +113,7 @@ WnyEditPDF/
 ├── main.py                 # entry point
 ├── requirements.txt
 ├── pyproject.toml          # package metadata
+├── build.bat               # builds the engine + the single .exe
 ├── BUILD.md                # packaging instructions
 ├── CHANGELOG.md
 ├── LICENSE                 # AGPL-3.0 (matches PyMuPDF/PyQt6)
@@ -96,11 +125,19 @@ WnyEditPDF/
 │   ├── document.py         # PdfDocument — all PDF operations (PyMuPDF)
 │   ├── docx_export.py      # PDF → Word (.docx) writer, no dependencies
 │   ├── compress.py         # PDF size reduction (images / fonts / structure)
+│   ├── engine.py           # bridge to the PdfCraft engine (pdfcraft-cli)
+│   ├── doc_tools.py        # engine-backed tools, their dialogs, welcome screen, Ctrl+K
+│   ├── catalog.py          # every tool, grouped as the tool panel shows them
+│   ├── shell.py            # the All-tools panel
+│   ├── icons.py            # tinted line icons (assets/icons: Lucide, ISC)
 │   ├── widgets.py          # PageView, dialogs, thumbnail list, search bar
 │   ├── window.py           # MainWindow — menus, toolbars, event wiring
 │   ├── assets/             # logo.png / logo.ico
 │   └── vendor/qrcode/      # bundled QR library (no external install needed)
 └── fonts/                  # 59 bundled Thai .ttf fonts (TH Sarabun family, etc.)
+
+../pdfcraft/                # PdfCraft engine source (Rust, MIT OR Apache-2.0)
+└── WNYEDITPDF.md           # what it is, upstream commit, local changes
 ```
 
 
@@ -140,7 +177,27 @@ licences (open your source, or buy commercial licences).
   ตัวอักษรที่ใช้จริง **ไฟล์ต้นฉบับไม่ถูกแตะ** (ได้ไฟล์ใหม่ `ชื่อเดิม_compressed.pdf`)
   ไฟล์ผลลัพธ์ถูกเปิดตรวจก่อนรับเสมอ ถ้าเล็กลงไม่ได้จะคืนไฟล์เดิมให้ — และ
   **ทำในเครื่องล้วนๆ** เอกสารที่อัปโหลดขึ้นเว็บบีบอัด PDF ไม่ได้ ก็บีบตรงนี้ได้
-- **ส่งออก** เป็น PDF, PNG, JPG หรือข้อความ; ใส่**รหัสผ่าน AES-256**
+- **ลายเซ็นดิจิทัลด้วยใบรับรอง** — ลงนามด้วยไฟล์ .p12/.pfx หรือใบรับรองใน Windows
+  (รวมบัตร/โทเคน USB) แบบ PAdES SHA-256 แสดงกรอบ "ลงนามดิจิทัลโดย…" เป็นภาษาไทยได้
+  และล็อกเอกสารห้ามแก้หลังลงนามได้ — **ตรวจสอบลายเซ็น** ว่าไฟล์ถูกแก้หลังลงนามหรือไม่
+  และสร้างใบรับรองส่วนตัวได้เอง
+- **เมนูเอกสาร** — คุณสมบัติเอกสาร (ฟอนต์ที่ฝัง ความปลอดภัย), จัดการบุ๊กมาร์ก,
+  **เปรียบเทียบ 2 เวอร์ชัน** (รายงาน PDF หรือใส่จุดต่างเป็นคอมเมนต์), ตรวจ/แปลง
+  **PDF/A-2b** สำหรับเก็บถาวรในระบบสารบรรณอิเล็กทรอนิกส์, ตรวจการเข้าถึง,
+  **ลบข้อมูลแฝง**ก่อนส่งไฟล์ออกนอกหน่วยงาน, Flatten และ**สร้างช่องกรอกฟอร์มอัตโนมัติ**
+  จากเส้นใต้/กล่องในแบบฟอร์ม — กรอกภาษาไทยในช่องฟอร์มได้ตัวอักษรครบ
+- **รวม**หลายไฟล์ (PDF + รูป + ข้อความ) เป็น PDF เดียวพร้อมบุ๊กมาร์ก, **แยก**ไฟล์ทุก N หน้า/
+  ตามบุ๊กมาร์ก/ตามขนาด, ดึงรูปที่ฝังในไฟล์, **ครอบตัดหน้า**, **พิมพ์**, ล้าง/ส่งออก/นำเข้า
+  ข้อมูลฟอร์ม, ทำ URL ในข้อความให้กดได้
+- **ส่งออก** เป็น PDF, PNG, JPG หรือข้อความ; ใส่**รหัสผ่าน AES-256** และจำกัดสิทธิ์
+  ห้ามพิมพ์/คัดลอก/แก้ไขได้
+- **หน้าตาแบบ Acrobat**: แท็บ เครื่องมือทั้งหมด · อ่าน · แก้ไข · แปลงไฟล์ · ลงนาม,
+  แผงเครื่องมือ 86 อย่างแบ่ง 14 หมวดสี, แถบเครื่องมือลอยข้างหน้ากระดาษ, ภาพย่อหน้าด้านขวา,
+  โหมดอ่านเต็มจอ และกด **Ctrl+K** ค้นหาคำสั่งได้ทุกคำสั่ง หน้าแรกมีไฟล์ล่าสุดและเครื่องมือยอดนิยม
+- **หัว/ท้ายกระดาษ** (เลขหน้า วันที่ พ.ศ.) และ**เลข Bates**, สีพื้นหลังแบบกระดาษสี,
+  สร้างเอกสารเปล่า/จากคลิปบอร์ด, ทำซ้ำ/แทนที่หน้า, ป้ายเลขหน้า, ขีดเส้นใต้/ขีดฆ่า/เส้นหยัก,
+  สี่เหลี่ยม/วงรี/เส้นตรง, รายการคอมเมนต์, **ค้นหาคำแล้วลบถาวรทุกจุด** (เช่น เลขบัตรประชาชน
+  ตาม PDPA), ลบทั้งหน้า, เพิ่มช่องฟอร์มเอง, ปลดรหัสผ่าน และส่งออกเป็นเว็บเพจ
 - ขยับข้อความ/รูปที่เลือก**ทีละ 1 จุดด้วยปุ่มลูกศร** (Shift = 5 จุด)
 - **Undo/Redo** เต็มรูปแบบ และสลับ **ไทย/อังกฤษ** ด้วยปุ่มธงมุมขวาบน
 
@@ -155,8 +212,9 @@ python main.py
 ```
 
 ### วิธีสร้างไฟล์ .exe (Windows)
-ดูรายละเอียดในไฟล์ `BUILD.md` — โดยสรุปใช้ PyInstaller ตามคำสั่งด้านบน
-ได้ไฟล์ `dist\WnyEditPDF.exe` ก๊อปไปเครื่องอื่นใช้ได้เลย
+ดับเบิลคลิก `build.bat` (ต้องมี Python, Rust และ Visual Studio Build Tools) —
+ได้ไฟล์ `dist\WnyEditPDF.exe` **ไฟล์เดียว** ที่มีเอนจินและฟอนต์อยู่ข้างใน
+ก๊อปไปเครื่องอื่นใช้ได้เลย รายละเอียดใน `BUILD.md`
 
 > Windows SmartScreen อาจเตือนว่า "ไม่รู้จักผู้เผยแพร่" เพราะไฟล์ไม่ได้เซ็น
 > ดิจิทัล — ปลอดภัย กด **More info → Run anyway** ได้เลย
@@ -168,4 +226,6 @@ PyQt6 เป็น GPL และ PyMuPDF เป็น AGPL ใช้ภายใ
 ## License
 
 Licensed under **AGPL-3.0** to comply with its dependencies (PyMuPDF is AGPL-3.0,
-PyQt6 is GPL-3.0). See `LICENSE` and `THIRD_PARTY_LICENSES.md` for details.
+PyQt6 is GPL-3.0). The bundled PdfCraft engine is MIT OR Apache-2.0 (its
+`LICENSE-*` and `NOTICE` files are in `../pdfcraft`). See `LICENSE` and
+`THIRD_PARTY_LICENSES.md` for details.

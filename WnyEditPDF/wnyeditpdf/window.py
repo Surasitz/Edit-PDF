@@ -15,8 +15,9 @@ import fitz
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QMessageBox, QToolBar,
     QLabel, QScrollArea, QInputDialog, QLineEdit, QWidget, QSizePolicy,
-    QStatusBar, QListWidget, QListWidgetItem, QSplitter, QSpinBox,
-    QComboBox, QToolButton, QDialog, QMenu, QProgressDialog
+    QStatusBar, QListWidgetItem, QSplitter, QSpinBox,
+    QComboBox, QToolButton, QDialog, QMenu, QProgressDialog, QStackedWidget,
+    QFrame, QHBoxLayout, QVBoxLayout, QButtonGroup, QPushButton
 )
 from PyQt6.QtGui import (
     QAction, QPixmap, QImage, QColor, QIcon, QKeySequence, QPalette
@@ -24,17 +25,22 @@ from PyQt6.QtGui import (
 from PyQt6.QtCore import Qt, QSize, QSettings, QLocale
 
 from .config import (
-    APP_NAME, VERSION, ORG_NAME, STYLE, CANVAS_GRAY, ADOBE_BLUE, resource_path,
+    APP_NAME, VERSION, ORG_NAME, STYLE, CANVAS_GRAY, resource_path,
     MODE_VIEW, MODE_EDIT_TEXT, MODE_MOVE_TEXT, MODE_DELETE_TEXT,
     MODE_ADD_TEXT, MODE_HIGHLIGHT, MODE_SIGNATURE, MODE_IMAGE, MODE_WHITEOUT,
-    MODE_PEN, MODE_COMMENT, MODE_LINK,
+    MODE_PEN, MODE_COMMENT, MODE_LINK, MODE_FORM,
 )
 from .fonts import FontManager
 from .document import PdfDocument
 from .i18n import tr as _tr
 from .docx_export import ExportCancelled
+from .doc_tools import DocToolsMixin, WelcomePanel
+from .shell import ToolPanel
+from .icons import icon
+from . import catalog
+from . import engine
 from .widgets import (PageView, TextEditDialog, SignatureDialog, CommentDialog,
-                      FindReplaceDialog, SearchBar,
+                      SearchBar,
                       ThumbnailList, symbol_image, qr_png_bytes,
                       stamp_text_image, ScanEnhanceDialog, WordExportDialog,
                       CompressDialog)
@@ -46,7 +52,7 @@ MAX_RECENT = 6
 _ARABIC_LOCALE = QLocale(QLocale.Language.English, QLocale.Country.UnitedStates)
 
 
-class MainWindow(QMainWindow):
+class MainWindow(DocToolsMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.pdf = PdfDocument()
@@ -77,7 +83,10 @@ class MainWindow(QMainWindow):
         self.saved_signatures = self._load_signatures()   # persistent signature gallery
         self.selection = None         # item selected for arrow-key nudging
         self._last_find = ""          # last search term
-        self.comment_kind = "note"    # note / arrow / textbox
+        self.comment_kind = "note"    # note / arrow / textbox / rect / oval / line
+        self.markup_kind = "highlight"  # highlight / underline / strikeout / squiggly
+        self.markup_color = QColor("#e03e3e")  # underline / strike-out / squiggly
+        self.form_kind = "text"       # text / checkbox / combobox / signature
         self.pen_color = QColor(20, 30, 115)   # pen colour (choosable)
         self.signature_width = 150
         self.image_png = None         # image to place (bytes)
@@ -127,8 +136,9 @@ class MainWindow(QMainWindow):
     #  UI
     # ======================================================
     def _build_ui(self):
-        # --- left thumbnail strip ---
+        # --- page thumbnails, on the right as in the new Acrobat ---
         self.thumbs = ThumbnailList(self)
+        self.thumbs.setObjectName("thumbs")
         self.thumbs.setIconSize(QSize(112, 150))
         self.thumbs.setFixedWidth(168)
         self.thumbs.currentRowChanged.connect(self._thumb_clicked)
@@ -145,10 +155,43 @@ class MainWindow(QMainWindow):
             wdg.setPalette(pal)
             wdg.setAutoFillBackground(True)
 
+        # before a file is open the page area shows the welcome screen
+        self.welcome = WelcomePanel(self)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.welcome)
+        self.stack.addWidget(self.scroll)
+
+        # the floating tool rail beside the page
+        self.rail = QFrame()
+        self.rail.setObjectName("rail")
+        self.rail_layout = QVBoxLayout(self.rail)
+        self.rail_layout.setContentsMargins(5, 6, 5, 6)
+        self.rail_layout.setSpacing(1)
+        rail_col = QVBoxLayout()
+        rail_col.setContentsMargins(10, 14, 0, 0)
+        rail_col.addWidget(self.rail)
+        rail_col.addStretch(1)
+        self.canvas = QWidget()
+        self.canvas.setObjectName("canvas")
+        self.canvas.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        canvas_lay = QHBoxLayout(self.canvas)
+        canvas_lay.setContentsMargins(0, 0, 0, 0)
+        canvas_lay.setSpacing(0)
+        canvas_lay.addLayout(rail_col)
+        canvas_lay.addWidget(self.stack, 1)
+
+        # every tool, grouped (left); the tabs choose what it shows
+        self.tab = "all"
+        self.panel_open = True
+        self.thumbs_open = True
+        self.tool_panel = ToolPanel(self)
+
         split = QSplitter()
+        split.addWidget(self.tool_panel)
+        split.addWidget(self.canvas)
         split.addWidget(self.thumbs)
-        split.addWidget(self.scroll)
         split.setStretchFactor(1, 1)
+        split.setChildrenCollapsible(False)
         self.setCentralWidget(split)
 
         # floating search bar (hidden until Ctrl+F)
@@ -178,13 +221,24 @@ class MainWindow(QMainWindow):
             tb.deleteLater()
         self._build_menus()
         self._build_toolbars()
+        self.tool_panel.rebuild()
         if self.pdf.is_open():
             self.refresh_all()
+        else:
+            self.render_page()           # the welcome screen speaks the new language too
 
     def _build_menus(self):
         # avoid duplicate/garbled menus on some systems: always use Qt's menu bar and clear first
         self.menuBar().setNativeMenuBar(False)
         self.menuBar().clear()
+        # The classic menu bar lives behind the "Menu" button in the top bar.
+        # A hidden menu bar no longer delivers its shortcuts, so every menu
+        # action is also added to the window itself (and removed again here
+        # when the menus are rebuilt for the other language).
+        self.menuBar().hide()
+        for a in getattr(self, "_win_actions", []):
+            self.removeAction(a)
+        self._win_actions = []
         # ---------- File ----------
         m_file = self.menuBar().addMenu(self.T("ไฟล์(&F)"))
         self._act(m_file, self.T("เปิด..."), self.open_pdf, "Ctrl+O")
@@ -193,17 +247,23 @@ class MainWindow(QMainWindow):
         m_file.addSeparator()
         self._act(m_file, self.T("บันทึก"), self.save_pdf, "Ctrl+S")
         self._act(m_file, self.T("บันทึกเป็น..."), self.save_as_pdf, "Ctrl+Shift+S")
-        self._act(m_file, self.T("บันทึกแบบมีรหัสผ่าน..."), self.save_encrypted)
+        self._act(m_file, self.T("🔒 ล็อกด้วยรหัสผ่าน / จำกัดสิทธิ์..."), self.protect_document)
         m_file.addSeparator()
         self._act(m_file, self.T("🕘 ประวัติเวอร์ชัน (กู้คืนไฟล์เก่า)..."),
                   self.show_version_history)
         m_file.addSeparator()
         self._act(m_file, self.T("รวม PDF (เลือกหน้า + ตำแหน่งแทรก)..."), self.merge_pdf)
+        self._act(m_file, self.T("📚 รวมหลายไฟล์เป็น PDF ใหม่ (PDF/รูปภาพ/ข้อความ)..."),
+                  self.combine_files)
         self._act(m_file, self.T("🗜 บีบอัด PDF ลดขนาดไฟล์ (ทีเดียวหลายไฟล์)..."),
                   self.compress_pdfs)
         self._act(m_file, self.T("ส่งออกหน้านี้เป็น PNG..."), self.export_png)
+        self._act(m_file, self.T("🖼 ดึงรูปภาพที่ฝังอยู่ในไฟล์ออกมา..."),
+                  self.export_embedded_images)
         self._act(m_file, self.T("📝 แปลงเป็น Word (.docx)..."), self.export_word)
         self._act(m_file, self.T("ดึงข้อความทั้งไฟล์เป็น .txt..."), self.export_text)
+        m_file.addSeparator()
+        self._act(m_file, self.T("🖨 พิมพ์..."), self.print_document, "Ctrl+P")
         m_file.addSeparator()
         self._act(m_file, self.T("ออกจากโปรแกรม"), self.close, "Ctrl+Q")
 
@@ -224,7 +284,24 @@ class MainWindow(QMainWindow):
         m_page.addSeparator()
         self._act(m_page, self.T("ลบหน้านี้"), self.delete_page)
         self._act(m_page, self.T("แทรกหน้าว่างหลังหน้านี้"), self.insert_blank_page)
+        self._act(m_page, self.T("✂️ ครอบตัดหน้า (Crop)..."), self.crop_pages)
         self._act(m_page, self.T("แยกช่วงหน้าเป็นไฟล์ใหม่..."), self.extract_pages)
+        self._act(m_page, self.T("✂️ แยกไฟล์เป็นหลายไฟล์ (ทุก N หน้า / ตามบุ๊กมาร์ก / ตามขนาด)..."),
+                  self.split_document)
+
+        # ---------- Document ----------
+        m_doc = self.menuBar().addMenu(self.T("เอกสาร(&D)"))
+        self._act(m_doc, self.T("ℹ️ คุณสมบัติเอกสาร..."), self.doc_properties, "Ctrl+D")
+        self._act(m_doc, self.T("🔖 บุ๊กมาร์ก (สารบัญด้านข้าง)..."), self.edit_bookmarks)
+        m_doc.addSeparator()
+        self._act(m_doc, self.T("🔍 เปรียบเทียบกับไฟล์เวอร์ชันอื่น..."), self.compare_versions)
+        self._act(m_doc, self.T("📄 ตรวจ / แปลงเป็น PDF/A (เก็บถาวร, สารบรรณอิเล็กทรอนิกส์)..."),
+                  self.pdfa_check)
+        self._act(m_doc, self.T("♿ ตรวจการเข้าถึง (Accessibility)..."), self.accessibility_check)
+        m_doc.addSeparator()
+        self._act(m_doc, self.T("🧹 ลบข้อมูลแฝง ก่อนส่งไฟล์ออก (Sanitize)..."), self.sanitize_document)
+        self._act(m_doc, self.T("📌 ทำให้คอมเมนต์/ฟอร์มแบนราบ (Flatten)..."), self.flatten_document)
+        self._act(m_doc, self.T("🪄 สร้างช่องกรอกฟอร์มอัตโนมัติ"), self.detect_form_fields)
 
         # ---------- Tools ----------
         m_tools = self.menuBar().addMenu(self.T("เครื่องมือ(&T)"))
@@ -238,9 +315,14 @@ class MainWindow(QMainWindow):
             self._act(sym, label, lambda _=False, k=kind: self.tool_symbol(k))
         self._act(m_tools, self.T("💧 ใส่ลายน้ำทุกหน้า..."), self.add_watermark)
         self._act(m_tools, self.T("📋 กรอกฟอร์ม (เลือกจากรายการช่อง)"), self.fill_form_dialog)
+        forms = m_tools.addMenu(self.T("🗂 ข้อมูลฟอร์ม"))
+        self._act(forms, self.T("🧽 ล้างค่าในฟอร์มทั้งหมด"), self.form_reset_all)
+        self._act(forms, self.T("📤 ส่งออกข้อมูลฟอร์ม / คอมเมนต์ (XFDF, CSV)..."), self.form_export_data)
+        self._act(forms, self.T("📥 นำเข้าข้อมูลฟอร์ม / คอมเมนต์..."), self.form_import_data)
         self._act(m_tools, self.T("⬜ ปิดทับพื้นที่ (ลากคลุม)"), lambda: self.change_mode(MODE_WHITEOUT))
         self._act(m_tools, self.T("🔗 เพิ่มลิงก์ (ลากคลุมพื้นที่)"), lambda: self.change_mode(MODE_LINK))
         self._act(m_tools, self.T("🔗 ใส่ลิงก์บนข้อความ (คลิกข้อความ)"), self.tool_link_on_text)
+        self._act(m_tools, self.T("🌐 ทำให้ URL ในข้อความกดได้อัตโนมัติ"), self.auto_links)
         self._act(m_tools, self.T("🔢 ใส่เลขหน้าอัตโนมัติ..."), self.add_page_numbers_ui)
         m_tools.addSeparator()
         self._act(m_tools, self.T("📋 ตราประทับข้อความ (สำเนาถูกต้อง/ด่วน/วันที่)..."), self.tool_stamp)
@@ -252,126 +334,259 @@ class MainWindow(QMainWindow):
         # ---------- Signature ----------
         m_sign = self.menuBar().addMenu(self.T("ลายเซ็น(&S)"))
         self._act(m_sign, self.T("✍️ สร้าง/เลือกลายเซ็น (วาด / นำเข้ารูป / พิมพ์ชื่อ)..."), self.tool_signature)
+        m_sign.addSeparator()
+        self._act(m_sign, self.T("🔏 ลงนามดิจิทัลด้วยใบรับรอง (.p12 / บัตร / โทเคน)..."), self.sign_digital)
+        self._act(m_sign, self.T("🛡 ตรวจสอบลายเซ็นดิจิทัลในไฟล์..."), self.verify_signatures)
+        self._act(m_sign, self.T("🪪 สร้างใบรับรองดิจิทัลส่วนตัว (.p12)..."), self.create_digital_id)
 
         # ---------- Help ----------
         m_help = self.menuBar().addMenu(self.T("ช่วยเหลือ(&H)"))
+        self._act(m_help, self.T("🔎 ค้นหาคำสั่งทั้งหมด..."), self.show_command_palette, "Ctrl+K")
+        m_help.addSeparator()
         self._act(m_help, f'{self.T("เกี่ยวกับ")} {APP_NAME}', self.about)
 
     def _build_toolbars(self):
-        # ============ row 1: file / navigation / zoom ============
-        tb1 = QToolBar()
-        tb1.setMovable(False)
-        self.addToolBar(tb1)
+        """Top bar (menu, mode tabs, tool search, file actions), the floating
+        tool rail beside the page and the page / zoom controls in the status
+        bar. Rebuilt whole when the language changes."""
+        T = self.T
+        top = QToolBar()
+        top.setObjectName("topBar")
+        top.setMovable(False)
+        top.setIconSize(QSize(20, 20))
+        self.addToolBar(top)
 
-        self._act(tb1, self.T("📂 เปิด"), self.open_pdf)
-        self._act(tb1, self.T("💾 บันทึก"), self.save_pdf)
-        tb1.addSeparator()
+        menu_btn = QToolButton()
+        menu_btn.setObjectName("menuBtn")
+        menu_btn.setText(T("เมนู"))
+        menu_btn.setIcon(icon("rows-3", "#1f2937"))
+        menu_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        main_menu = QMenu(menu_btn)
+        main_menu.aboutToShow.connect(lambda m=main_menu: self._fill_main_menu(m))
+        menu_btn.setMenu(main_menu)
+        top.addWidget(menu_btn)
+        top.addSeparator()
 
-        self.btn_undo = QToolButton(text="↶")
-        self.btn_undo.setToolTip("เลิกทำ (Ctrl+Z)")
-        self.btn_undo.clicked.connect(self.undo)
-        tb1.addWidget(self.btn_undo)
-        self.btn_redo = QToolButton(text="↷")
-        self.btn_redo.setToolTip("ทำซ้ำ (Ctrl+Y)")
-        self.btn_redo.clicked.connect(self.redo)
-        tb1.addWidget(self.btn_redo)
-        tb1.addSeparator()
+        self.tab_buttons = {}
+        group = QButtonGroup(top)
+        group.setExclusive(True)
+        for key, label, _ids in catalog.TABS:
+            b = QToolButton()
+            b.setObjectName("modeTab")
+            b.setText(T(label))
+            b.setCheckable(True)
+            b.clicked.connect(lambda _=False, k=key: self.set_tab(k))
+            group.addButton(b)
+            top.addWidget(b)
+            self.tab_buttons[key] = b
+        self.tab_buttons[self.tab].setChecked(True)
 
-        self._act(tb1, "◀", self.prev_page)
-        self.page_spin = QSpinBox()
-        self.page_spin.setRange(1, 1)
-        self.page_spin.setFixedWidth(58)
-        self.page_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.page_spin.setLocale(_ARABIC_LOCALE)   # keep the page box in Arabic digits
-        self.page_spin.valueChanged.connect(self.jump_page)
-        tb1.addWidget(self.page_spin)
-        self.page_total = QLabel(" / 0  ")
-        tb1.addWidget(self.page_total)
-        self._act(tb1, "▶", self.next_page)
-        tb1.addSeparator()
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        top.addWidget(spacer)
+        search = QPushButton("  " + T("ค้นหาเครื่องมือและคำสั่ง") + "        Ctrl+K")
+        search.setObjectName("searchBox")
+        search.setIcon(icon("search", "#6b7280", 16))
+        search.setCursor(Qt.CursorShape.PointingHandCursor)
+        search.clicked.connect(self.show_command_palette)
+        top.addWidget(search)
+        top.addSeparator()
 
-        self._act(tb1, "−", lambda: self.set_zoom(self.zoom / 1.2))
-        self.zoom_combo = QComboBox()
-        self.zoom_combo.setEditable(True)
-        self.zoom_combo.setFixedWidth(86)
-        for z in ("50%", "75%", "100%", "125%", "150%", "200%", "300%", "400%"):
-            self.zoom_combo.addItem(z)
-        self.zoom_combo.setCurrentText("150%")
-        self.zoom_combo.activated.connect(
-            lambda _: self._apply_zoom_text(self.zoom_combo.currentText()))
-        self.zoom_combo.lineEdit().returnPressed.connect(
-            lambda: self._apply_zoom_text(self.zoom_combo.currentText()))
-        tb1.addWidget(self.zoom_combo)
-        self._act(tb1, "+", lambda: self.set_zoom(self.zoom * 1.2))
-        self._act(tb1, self.T("พอดีหน้า"), self.fit_page)
-        tb1.addSeparator()
-        self._act(tb1, self.T("🔎 ค้นหา/แทนที่"), self.search_text)
+        def top_btn(name, tip, slot):
+            b = QToolButton()
+            b.setObjectName("topIcon")
+            b.setIcon(icon(name, "#374151"))
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            top.addWidget(b)
+            return b
 
-        # ============ row 2: editing tools ============
-        self.addToolBarBreak()
-        tb2 = QToolBar()
-        tb2.setMovable(False)
-        self.addToolBar(tb2)
+        top_btn("folder-open", T("เปิด (Ctrl+O)"), self.open_pdf)
+        top_btn("save", T("บันทึก (Ctrl+S)"), self.save_pdf)
+        top_btn("printer", T("พิมพ์ (Ctrl+P)"), self.print_document)
+        top_btn("file-search", T("ค้นหา / แทนที่ในเอกสาร (Ctrl+F)"), self.search_text)
+        self.btn_undo = top_btn("undo-2", T("เลิกทำ (Ctrl+Z)"), self.undo)
+        self.btn_redo = top_btn("redo-2", T("ทำซ้ำ (Ctrl+Y)"), self.redo)
+        top_btn("info", T("คุณสมบัติเอกสาร (Ctrl+D)"), self.doc_properties)
 
+        self.btn_lang = QToolButton()
+        self.btn_lang.setObjectName("langBtn")
+        # show the language you will switch TO
+        self.btn_lang.setText("EN" if self.lang == "th" else "ไทย")
+        self.btn_lang.setIcon(icon("languages", "#1473e6", 16))
+        self.btn_lang.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_lang.setToolTip("คลิกเพื่อสลับภาษา ไทย/อังกฤษ\nSwitch language")
+        self.btn_lang.clicked.connect(self.toggle_language)
+        top.addWidget(self.btn_lang)
+
+        self._build_rail()
+        self._build_navbar()
+        self._apply_layout()
+
+    RAIL = (
+        (MODE_VIEW, "mouse-pointer-2", "เลือก / ดู", "โหมดดู / คลิกไอคอนคอมเมนต์เพื่ออ่าน"),
+        (MODE_EDIT_TEXT, "pencil", "แก้ข้อความ", "คลิกข้อความเดิมเพื่อแก้ไข (เลือกฟอนต์/ขนาด/สีในกล่อง)"),
+        (MODE_ADD_TEXT, "type", "เพิ่มข้อความ", "คลิกตำแหน่งว่างเพื่อพิมพ์ข้อความใหม่"),
+        (MODE_MOVE_TEXT, "move", "ขยับ/ย่อขยาย", "ลากข้อความหรือรูปไปวางที่ใหม่ / ลากมุมเพื่อย่อ-ขยาย / Ctrl+คลิก เลือกหลายข้อความขยับพร้อมกัน"),
+        None,
+        (MODE_HIGHLIGHT, "highlighter", "ไฮไลท์", "ลากคลุมข้อความเพื่อไฮไลท์ (ลูกศรข้างปุ่ม: ขีดเส้นใต้ / ขีดฆ่า / สี)"),
+        (MODE_PEN, "pen-tool", "ปากกา", "ลากเมาส์วาดเส้นอิสระ (วงกลม/ขีดเส้นใต้เอกสาร)"),
+        (MODE_COMMENT, "message-square-plus", "คอมเมนต์", "คลิกบนหน้าเพื่อวางโน้ต / ลูกศรข้างปุ่ม: กล่องข้อความ ลูกศร รูปทรง"),
+        None,
+        (MODE_SIGNATURE, "signature", "ลายเซ็น", "เลือก/สร้างลายเซ็น แล้วคลิกวางบนหน้า"),
+        (MODE_IMAGE, "image-plus", "รูปภาพ", "เลือกรูป แล้วคลิกวางบนหน้า"),
+        (MODE_WHITEOUT, "eraser", "ปิดทับ / ลบพื้นที่", "ลากคลุมพื้นที่เพื่อลบ/ปิดทับด้วยสีขาว"),
+        (MODE_DELETE_TEXT, "trash-2", "ลบ", "คลิกข้อความ รูป ลายเซ็น เส้นปากกา หรือคอมเมนต์ เพื่อลบ"),
+    )
+
+    def _build_rail(self):
+        """The tool modes as an icon column floating beside the page."""
+        T = self.T
+        lay = self.rail_layout
+        while lay.count():
+            item = lay.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()          # deleteLater waits for the event loop
+                item.widget().deleteLater()
         self.mode_buttons = {}
-        for mode, label, tip in (
-            (MODE_VIEW, "🖱 เลือก", "โหมดดู / คลิกไอคอนคอมเมนต์เพื่ออ่าน"),
-            (MODE_EDIT_TEXT, "✏️ แก้ข้อความ", "คลิกข้อความเดิมเพื่อแก้ไข (เลือกฟอนต์/ขนาด/สีในกล่อง)"),
-            (MODE_MOVE_TEXT, "✥ ขยับ/ย่อขยาย", "ลากข้อความหรือรูปไปวางที่ใหม่ / ลากมุมเพื่อย่อ-ขยาย / Ctrl+คลิก เลือกหลายข้อความขยับพร้อมกัน"),
-            (MODE_DELETE_TEXT, "🗑 ลบ", "คลิกข้อความ รูป ลายเซ็น เส้นปากกา หรือคอมเมนต์ เพื่อลบ"),
-            (MODE_ADD_TEXT, "＋ เพิ่มข้อความ", "คลิกตำแหน่งว่างเพื่อพิมพ์ข้อความใหม่"),
-            (MODE_HIGHLIGHT, "🖍 ไฮไลท์", "ลากคลุมข้อความเพื่อไฮไลท์"),
-            (MODE_PEN, "🖊 ปากกา", "ลากเมาส์วาดเส้นอิสระ (วงกลม/ขีดเส้นใต้เอกสาร)"),
-            (MODE_SIGNATURE, "✍️ ลายเซ็น", "เลือก/สร้างลายเซ็น แล้วคลิกวางบนหน้า"),
-            (MODE_IMAGE, "🖼 รูปภาพ", "เลือกรูป แล้วคลิกวางบนหน้า"),
-            (MODE_COMMENT, "💬 คอมเมนต์", "คลิกบนหน้าเพื่อวางโน้ต / คลิกไอคอนเดิมเพื่อแก้"),
-            (MODE_WHITEOUT, "⬜ ปิดทับ", "ลากคลุมพื้นที่เพื่อลบ/ปิดทับด้วยสีขาว"),
-        ):
+        for entry in self.RAIL:
+            if entry is None:
+                sep = QFrame()
+                sep.setObjectName("railSep")
+                lay.addWidget(sep)
+                continue
+            mode, name, label, tip = entry
             btn = QToolButton()
-            btn.setText(self.T(label))
-            btn.setToolTip(self.T(tip))
+            btn.setObjectName("railBtn")
+            btn.setIcon(icon(name, "#374151", 22, active="#1473e6"))
+            btn.setIconSize(QSize(22, 22))
+            btn.setToolTip("<b>%s</b><br>%s" % (T(label), T(tip)))
             btn.setCheckable(True)
             if mode == MODE_SIGNATURE:
                 btn.clicked.connect(self.tool_signature)   # open the picker every time
             elif mode == MODE_IMAGE:
                 btn.clicked.connect(self.tool_image)       # open the picker every time
-            elif mode == MODE_HIGHLIGHT:
-                # highlight button doubles as a colour dropdown (swatches + custom)
-                btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-                btn.clicked.connect(lambda _, md=mode: self.change_mode(md))
-                btn.setMenu(self._make_highlight_menu())
-            elif mode == MODE_COMMENT:
-                # comment button doubles as a style dropdown (note / arrow / textbox)
-                btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-                btn.clicked.connect(lambda _, md=mode: self.change_mode(md))
-                btn.setMenu(self._make_comment_menu())
-            elif mode == MODE_PEN:
-                # pen button doubles as a colour dropdown
-                btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-                btn.clicked.connect(lambda _, md=mode: self.change_mode(md))
-                btn.setMenu(self._make_pen_menu())
             else:
                 btn.clicked.connect(lambda _, md=mode: self.change_mode(md))
-            tb2.addWidget(btn)
+            menus = {MODE_HIGHLIGHT: self._make_highlight_menu,
+                     MODE_COMMENT: self._make_comment_menu,
+                     MODE_PEN: self._make_pen_menu}
+            if mode in menus:
+                # the button doubles as a dropdown: kind / colour
+                btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+                btn.setMenu(menus[mode]())
+            lay.addWidget(btn)
             self.mode_buttons[mode] = btn
-        self.mode_buttons[MODE_VIEW].setChecked(True)
+        self.mode_buttons.get(self.mode, self.mode_buttons[MODE_VIEW]).setChecked(True)
         self._refresh_hl_swatch()
         self._refresh_pen_swatch()
 
-        # push the flag button to the far right
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        tb2.addWidget(spacer)
-        self.btn_lang = QToolButton()
-        # show the flag of the language you will switch TO, styled to stand out
-        self.btn_lang.setText("🇬🇧 EN" if self.lang == "th" else "🇹🇭 ไทย")
-        self.btn_lang.setToolTip("คลิกเพื่อสลับภาษา ไทย/อังกฤษ\nSwitch language")
-        self.btn_lang.setStyleSheet(
-            "QToolButton { background: #1473e6; color: #ffffff; font-weight: 700;"
-            " padding: 5px 14px; border-radius: 6px; margin: 0 4px; }"
-            "QToolButton:hover { background: #0d5fc4; }")
-        self.btn_lang.clicked.connect(self.toggle_language)
-        tb2.addWidget(self.btn_lang)
+    def _build_navbar(self):
+        """Page and zoom controls, at the right of the status bar."""
+        T = self.T
+        old = getattr(self, "_navbar", None)
+        if old is not None:
+            self.statusBar().removeWidget(old)
+            old.deleteLater()
+        bar = QWidget()
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(0, 0, 6, 0)
+        lay.setSpacing(2)
+
+        def nav_btn(name, tip, slot):
+            b = QToolButton()
+            b.setObjectName("navBtn")
+            b.setIcon(icon(name, "#4b5563", 16))
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            lay.addWidget(b)
+            return b
+
+        nav_btn("chevron-left", T("หน้าก่อน"), self.prev_page)
+        self.page_spin = QSpinBox()
+        self.page_spin.setRange(1, 1)
+        self.page_spin.setFixedWidth(56)
+        self.page_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_spin.setLocale(_ARABIC_LOCALE)   # keep the page box in Arabic digits
+        self.page_spin.valueChanged.connect(self.jump_page)
+        lay.addWidget(self.page_spin)
+        self.page_total = QLabel(" / 0 ")
+        lay.addWidget(self.page_total)
+        nav_btn("chevron-right", T("หน้าถัดไป"), self.next_page)
+        lay.addSpacing(10)
+        nav_btn("zoom-out", T("ย่อ"), lambda: self.set_zoom(self.zoom / 1.2))
+        self.zoom_combo = QComboBox()
+        self.zoom_combo.setEditable(True)
+        self.zoom_combo.setFixedWidth(84)
+        for z in ("50%", "75%", "100%", "125%", "150%", "200%", "300%", "400%"):
+            self.zoom_combo.addItem(z)
+        self.zoom_combo.setCurrentText("%d%%" % round(self.zoom * 100))
+        self.zoom_combo.activated.connect(
+            lambda _: self._apply_zoom_text(self.zoom_combo.currentText()))
+        self.zoom_combo.lineEdit().returnPressed.connect(
+            lambda: self._apply_zoom_text(self.zoom_combo.currentText()))
+        lay.addWidget(self.zoom_combo)
+        nav_btn("zoom-in", T("ขยาย"), lambda: self.set_zoom(self.zoom * 1.2))
+        nav_btn("maximize", T("พอดีหน้า"), self.fit_page)
+        lay.addSpacing(10)
+        nav_btn("panel-right", T("แสดง/ซ่อนภาพย่อหน้า"), self.toggle_thumbs)
+        self.statusBar().addPermanentWidget(bar)
+        self._navbar = bar
+
+    def _fill_main_menu(self, menu):
+        """The classic menus, behind the Menu button."""
+        menu.clear()
+        for a in self.menuBar().actions():
+            menu.addAction(a)
+
+    # ---------------- tabs, panels, layout ----------------
+    def set_tab(self, key):
+        """All tools / Read / Edit / Convert / E-Sign."""
+        if self.tab == "read" and key != "read":
+            self.statusBar().clearMessage()
+        self.tab = key
+        btn = getattr(self, "tab_buttons", {}).get(key)
+        if btn is not None and not btn.isChecked():
+            btn.setChecked(True)
+        if key == "read":
+            self.status(self.T("โหมดอ่าน — กด Esc หรือเลือกแท็บอื่นเพื่อกลับ"))
+        else:
+            self.panel_open = True
+            ids = dict((k, v) for k, _l, v in catalog.TABS).get(key)
+            label = dict((k, l) for k, l, _v in catalog.TABS).get(key)
+            if ids:
+                self.tool_panel.show_groups(ids, label)
+            else:
+                self.tool_panel.show_home()
+        self._apply_layout()
+
+    def hide_tool_panel(self):
+        self.panel_open = False
+        self._apply_layout()
+
+    def toggle_thumbs(self):
+        self.thumbs_open = not self.thumbs_open
+        self._apply_layout()
+
+    def _apply_layout(self):
+        """Show the panels that fit the moment: no rail or thumbnails without
+        a document, nothing but the page in Read mode."""
+        if not hasattr(self, "tool_panel"):
+            return
+        has_doc = self.pdf.is_open() and self.pdf.page_count > 0
+        reading = self.tab == "read" and has_doc
+        self.tool_panel.setVisible(self.panel_open and not reading)
+        self.rail.setVisible(has_doc and not reading)
+        self.thumbs.setVisible(has_doc and self.thumbs_open and not reading)
+
+    def run_tool(self, item):
+        """Run a catalogue item; tools that work on a document ask for one."""
+        if item.needs_doc and not self.pdf.is_open():
+            self.open_pdf()
+            if not self.pdf.is_open():
+                return
+        item.run(self)
 
     # named highlight colours shown in the dropdown
     HL_COLORS = [("เหลือง", "#ffeb3c"), ("เขียว", "#a5f36b"),
@@ -383,7 +598,10 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         for kind, label in (("note", "📌 โน้ต (คลิกวาง)"),
                             ("arrow", "➶ ลูกศรชี้ (ลาก)"),
-                            ("textbox", "▭ กล่องข้อความ (ลาก)")):
+                            ("textbox", "▭ กล่องข้อความ (ลาก)"),
+                            ("rect", "□ สี่เหลี่ยม (ลาก)"),
+                            ("oval", "○ วงรี (ลาก)"),
+                            ("line", "╱ เส้นตรง (ลาก)")):
             act = QAction(self.T(label), self)
             act.triggered.connect(lambda _=False, k=kind: self._set_comment_kind(k))
             m.addAction(act)
@@ -394,7 +612,10 @@ class MainWindow(QMainWindow):
         self.change_mode(MODE_COMMENT)
         how = {"note": "คลิกบนหน้าเพื่อวางโน้ต",
                "arrow": "ลากจากต้นทางไปปลายทางเพื่อวางลูกศรชี้",
-               "textbox": "ลากกรอบเพื่อวางกล่องข้อความ"}[kind]
+               "textbox": "ลากกรอบเพื่อวางกล่องข้อความ",
+               "rect": "ลากเพื่อวาดสี่เหลี่ยม",
+               "oval": "ลากเพื่อวาดวงรี",
+               "line": "ลากเพื่อวาดเส้นตรง"}[kind]
         self.status(f"โหมดคอมเมนต์: {how}")
 
     def add_page_numbers_ui(self):
@@ -493,6 +714,14 @@ class MainWindow(QMainWindow):
     def place_comment_drag(self, p1, p2):
         """Place an arrow or text-box comment from a drag (p1..p2, PDF coords)."""
         kind = self.comment_kind
+        if kind in ("rect", "oval", "line"):
+            try:
+                self.pdf.add_shape(self.page_index, p1, p2, kind)
+                self.render_page()
+                self.status(self.T("วาดรูปทรงแล้ว ✓ (Ctrl+Z ย้อนกลับได้)"))
+            except Exception as e:
+                QMessageBox.critical(self, APP_NAME, f"วาดไม่สำเร็จ:\n{e}")
+            return
         dlg = CommentDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -504,9 +733,22 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, APP_NAME, f"เพิ่มคอมเมนต์ไม่สำเร็จ:\n{e}")
 
+    MARKUP_KINDS = (("highlight", "highlighter", "ไฮไลท์"), ("underline", "underline", "ขีดเส้นใต้"),
+                    ("strikeout", "strikethrough", "ขีดฆ่า"), ("squiggly", "spline", "เส้นหยัก"))
+
     def _make_highlight_menu(self):
         from PyQt6.QtGui import QAction, QPixmap, QIcon
         m = QMenu(self)
+        kinds = {}
+        for kind, name, label in self.MARKUP_KINDS:
+            act = QAction(icon(name), self.T(label), self)
+            act.setCheckable(True)
+            act.triggered.connect(lambda _=False, k=kind: self.set_markup(k))
+            m.addAction(act)
+            kinds[kind] = act
+        m.aboutToShow.connect(
+            lambda: [a.setChecked(k == self.markup_kind) for k, a in kinds.items()])
+        m.addSeparator()
         for label, hexc in self.HL_COLORS:
             pm = QPixmap(18, 18); pm.fill(QColor(hexc))
             act = QAction(QIcon(pm), self.T(label), self)
@@ -518,8 +760,49 @@ class MainWindow(QMainWindow):
         m.addAction(more)
         return m
 
+    def set_markup(self, kind):
+        """Highlight / underline / strike-out / squiggly, then drag over text."""
+        self.markup_kind = kind
+        self.change_mode(MODE_HIGHLIGHT)
+        label = dict((k, l) for k, _n, l in self.MARKUP_KINDS)[kind]
+        self.status(self.T("%s: ลากคลุมข้อความ") % self.T(label))
+
+    def set_form_kind(self, kind):
+        """Add a fillable field: drag a box where it should go."""
+        if not self.pdf.is_open():
+            return self.need_file()
+        self.form_kind = kind
+        self.change_mode(MODE_FORM)
+        self.status(self.T("ลากกรอบบนหน้าเพื่อวางช่องฟอร์ม"))
+
+    def add_form_field_ui(self, rect):
+        if rect.width < 6 or rect.height < 6:
+            self.status(self.T("กรอบเล็กเกินไป — ลากให้กว้างขึ้น"))
+            return
+        choices = None
+        if self.form_kind == "combobox":
+            text, ok = QInputDialog.getText(
+                self, self.T("รายการให้เลือก"),
+                self.T("ใส่ตัวเลือก คั่นด้วยเครื่องหมายจุลภาค ( , ):"),
+                text=self.T("ใช่, ไม่ใช่"))
+            if not ok:
+                return
+            choices = [c.strip() for c in text.split(",") if c.strip()] or ["-"]
+        name, ok = QInputDialog.getText(self, self.T("ชื่อช่อง"),
+                                        self.T("ชื่อช่อง (ใช้ตอนส่งออกข้อมูล):"))
+        if not ok:
+            return
+        try:
+            name = self.pdf.add_form_field(self.page_index, rect, self.form_kind,
+                                           name=name.strip() or None, choices=choices)
+            self.render_page()
+            self.status(self.T("เพิ่มช่อง %s แล้ว ✓ (Ctrl+Z ย้อนกลับได้)") % name)
+        except Exception as e:
+            QMessageBox.critical(self, APP_NAME, f"เพิ่มช่องไม่สำเร็จ:\n{e}")
+
     def _set_highlight_color(self, qc):
         self.highlight_color = qc
+        self.markup_kind = "highlight"
         self._refresh_hl_swatch()
         self.change_mode(MODE_HIGHLIGHT)
         self.status(f"ตั้งสีไฮไลท์แล้ว — ลากคลุมข้อความได้เลย")
@@ -544,6 +827,9 @@ class MainWindow(QMainWindow):
         if shortcut:
             a.setShortcut(QKeySequence(shortcut))
         parent.addAction(a)
+        if shortcut and isinstance(parent, QMenu):
+            self.addAction(a)
+            self._win_actions.append(a)
         return a
 
     def status(self, msg):
@@ -620,6 +906,8 @@ class MainWindow(QMainWindow):
             return
         if not self.pdf.path:
             return self.save_as_pdf()
+        if not self._confirm_break_signature():
+            return
         # about to overwrite the original -> warn and offer safer options
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
@@ -743,6 +1031,8 @@ class MainWindow(QMainWindow):
             # --- save as PDF ---
             if not low.endswith(".pdf"):
                 path += ".pdf"
+            if not self._confirm_break_signature():
+                return
             pages = self._ask_page_subset()
             if pages == "cancel":
                 return
@@ -795,25 +1085,6 @@ class MainWindow(QMainWindow):
         except ValueError as e:
             QMessageBox.warning(self, APP_NAME, str(e))
             return "cancel"
-
-    def save_encrypted(self):
-        if not self.pdf.is_open():
-            return self.need_file()
-        pw, ok = QInputDialog.getText(self, "ตั้งรหัสผ่าน",
-                                      "รหัสผ่านสำหรับเปิดไฟล์:", QLineEdit.EchoMode.Password)
-        if not ok or not pw:
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "บันทึกไฟล์ที่ล็อกรหัส", "",
-                                              "PDF Files (*.pdf)")
-        if not path:
-            return
-        if not path.lower().endswith(".pdf"):
-            path += ".pdf"
-        try:
-            self.pdf.save_encrypted(path, pw)
-            self.status(f"บันทึกไฟล์พร้อมรหัสผ่านแล้ว: {os.path.basename(path)} ✓")
-        except Exception as e:
-            QMessageBox.critical(self, APP_NAME, f"บันทึกไม่สำเร็จ:\n{e}")
 
     @staticmethod
     def _parse_pages(text, maxpage):
@@ -1071,11 +1342,13 @@ class MainWindow(QMainWindow):
     def render_page(self):
         if not self.pdf.is_open() or self.pdf.page_count == 0:
             self.page_view.clear()
-            self.page_view.setText(
-                self.T("เปิดไฟล์ PDF เพื่อเริ่มใช้งาน\n\n"
-                       "📂 กด Ctrl+O  หรือ  ลากไฟล์ PDF มาวางที่นี่"))
+            self.welcome.rebuild()
+            self.stack.setCurrentWidget(self.welcome)
+            self._apply_layout()
             self._update_undo_buttons()
             return
+        self.stack.setCurrentWidget(self.scroll)
+        self._apply_layout()
         self.page_index = max(0, min(self.page_index, self.pdf.page_count - 1))
         # when the page actually changes, clear per-page overlays (selection
         # outline, drag box, comment drag) so a frame from page 1 never lingers
@@ -1098,7 +1371,7 @@ class MainWindow(QMainWindow):
         self.page_spin.setMaximum(self.pdf.page_count)
         self.page_spin.setValue(self.page_index + 1)
         self.page_spin.blockSignals(False)
-        self.page_total.setText(f" / {self.pdf.page_count}  ")
+        self.page_total.setText(f" / {self.pdf.page_count} ")
         self.zoom_combo.blockSignals(True)
         self.zoom_combo.setCurrentText(f"{int(round(self.zoom * 100))}%")
         self.zoom_combo.blockSignals(False)
@@ -1361,11 +1634,12 @@ class MainWindow(QMainWindow):
 
     def add_highlight(self, rect):
         try:
-            c = self.highlight_color
-            self.pdf.highlight(self.page_index, rect,
-                               color=(c.redF(), c.greenF(), c.blueF()))
+            kind = self.markup_kind
+            c = self.highlight_color if kind == "highlight" else self.markup_color
+            self.pdf.markup(self.page_index, rect, kind,
+                            color=(c.redF(), c.greenF(), c.blueF()))
             self.render_page()
-            self.status("ไฮไลท์แล้ว ✓")
+            self.status(self.T("มาร์กข้อความแล้ว ✓ (Ctrl+Z ย้อนกลับได้)"))
         except Exception as e:
             QMessageBox.critical(self, APP_NAME, f"ไฮไลท์ไม่สำเร็จ:\n{e}")
 
@@ -1907,6 +2181,7 @@ class MainWindow(QMainWindow):
             MODE_LINK: Qt.CursorShape.CrossCursor,
             MODE_PEN: Qt.CursorShape.CrossCursor,
             MODE_COMMENT: Qt.CursorShape.PointingHandCursor,
+            MODE_FORM: Qt.CursorShape.CrossCursor,
         }
         self.page_view.setCursor(cursors[mode])
         self.page_view.hover_span = None
@@ -1954,6 +2229,9 @@ class MainWindow(QMainWindow):
         if k == Qt.Key.Key_Escape:
             if self.search_bar.isVisible():
                 self.search_close()
+                return
+            if self.tab == "read":
+                self.set_tab("all")
                 return
             self.selection = None
             self.page_view.sel_span = None
@@ -2233,25 +2511,36 @@ class MainWindow(QMainWindow):
             ev.ignore()
 
     def about(self):
+        ver = engine.version() if engine.available() else None
+        if self.lang == "en":
+            engine_line = (f"Document tools: {ver} engine (PdfCraft, MIT / Apache-2.0)"
+                           if ver else "Document tools engine (PdfCraft) not installed")
+        else:
+            engine_line = (f"เครื่องมือเอกสาร: เอนจิน {ver} (PdfCraft, MIT / Apache-2.0)"
+                           if ver else "ยังไม่ได้ติดตั้งเอนจินเครื่องมือเอกสาร (PdfCraft)")
         if self.lang == "en":
             QMessageBox.about(self, f"About {APP_NAME}",
                               f"<h3>{APP_NAME} v{VERSION}</h3>"
                               "<p>A PDF reader &amp; editor.</p>"
                               "<p>Edit/move/delete/add text • Highlight • Signatures<br>"
                               "Insert images • White-out • Watermark • Password • Undo/Redo<br>"
-                              "Page management • Merge/Split • Find/Replace</p>"
+                              "Page management • Merge/Split • Find/Replace<br>"
+                              "Digital signatures • PDF/A • Compare • Accessibility • Sanitize</p>"
                               f"<p><b>Fonts:</b> {len(self.fm)} bundled "
                               "(incl. the full TH Sarabun family)</p>"
-                              "<p>Built with Python + PyQt6 + PyMuPDF</p>")
+                              "<p>Built with Python + PyQt6 + PyMuPDF</p>"
+                              f"<p>{engine_line}</p>")
         else:
             QMessageBox.about(self, f"เกี่ยวกับ {APP_NAME}",
                               f"<h3>{APP_NAME} v{VERSION}</h3>"
                               "<p>โปรแกรมอ่านและแก้ไขไฟล์ PDF</p>"
                               "<p>แก้ไข/ขยับ/ลบ/เพิ่มข้อความ • ไฮไลท์ • ลายเซ็น 3 แบบ<br>"
                               "แทรกรูปภาพ • ปิดทับ • ลายน้ำ • รหัสผ่าน • Undo/Redo<br>"
-                              "จัดการหน้า • รวม/แยกไฟล์ • ค้นหา/แทนที่</p>"
+                              "จัดการหน้า • รวม/แยกไฟล์ • ค้นหา/แทนที่<br>"
+                              "ลายเซ็นดิจิทัล • PDF/A • เปรียบเทียบเอกสาร • ตรวจการเข้าถึง • ลบข้อมูลแฝง</p>"
                               f"<p><b>ฟอนต์:</b> {len(self.fm)} แบบ (รวม TH Sarabun ทุกตระกูล)</p>"
-                              "<p>พัฒนาด้วย Python + PyQt6 + PyMuPDF</p>")
+                              "<p>พัฒนาด้วย Python + PyQt6 + PyMuPDF</p>"
+                              f"<p>{engine_line}</p>")
 
 
 def run():

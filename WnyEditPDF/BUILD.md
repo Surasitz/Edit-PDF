@@ -1,50 +1,51 @@
 # การติดตั้งและสร้างไฟล์ปฏิบัติการ (Build Guide)
 
-WnyEditPDF — โปรแกรมอ่าน/แก้ไข PDF ภาษาไทย
+WnyEditPDF ประกอบด้วย 2 ส่วนในโปรเจกต์เดียว:
 
-## 1. ติดตั้งไลบรารีที่ต้องใช้ (ครั้งแรกครั้งเดียว)
+| โฟลเดอร์ | ภาษา | หน้าที่ |
+|---|---|---|
+| `WnyEditPDF/` (โฟลเดอร์นี้) | Python + PyQt6 + PyMuPDF | ตัวโปรแกรม หน้าจอ และงานบนหน้ากระดาษทั้งหมด |
+| `../pdfcraft/` | Rust | เอนจิน `pdfcraft-cli.exe` สำหรับงานระดับเอกสาร (ลายเซ็นดิจิทัล, PDF/A, เปรียบเทียบ ฯลฯ) |
+
+ผลลัพธ์สุดท้ายคือ **`dist\WnyEditPDF.exe` ไฟล์เดียว** ที่ฝังเอนจิน ฟอนต์ และทุกอย่างไว้ข้างใน
+
+## 1. สิ่งที่ต้องติดตั้ง (ครั้งแรกครั้งเดียว)
+
+- Python 3.10 ขึ้นไป
+- Rust (https://rustup.rs) และ Visual Studio Build Tools (เลือก "Desktop development with C++")
+
+## 2. สร้างไฟล์ .exe (Windows)
+
+```bat
+build.bat
+```
+
+สคริปต์จะทำ 4 ขั้น: build เอนจิน Rust → ติดตั้งไลบรารี Python → สร้าง .exe ด้วย
+PyInstaller (ฝัง `pdfcraft-cli.exe` ไว้ในโฟลเดอร์ `engine/` ภายใน) → ตรวจผลลัพธ์
+
+ไฟล์ที่ได้คือ `dist\WnyEditPDF.exe` — คัดลอกไปเครื่องอื่นใช้ได้เลย ไม่ต้องติดตั้งอะไรเพิ่ม
+
+## 3. รันจากซอร์ส (ไม่ต้องสร้าง .exe)
 
 ```bash
 pip install -r requirements.txt
-pip install pyinstaller        # เฉพาะตอนจะสร้างไฟล์ .exe
-```
-
-## 2. รันโปรแกรมจากซอร์ส (ไม่ต้อง build)
-
-```bash
+cd ../pdfcraft && cargo build --release -p pdfcraft-cli && cd ../WnyEditPDF
 python main.py
 ```
 
-## 3. สร้างไฟล์ .exe สำหรับแจกจ่าย
+โปรแกรมหาเอนจินที่ `../pdfcraft/target/release/pdfcraft-cli.exe` เอง
+(หรือกำหนดเองด้วยตัวแปร `WNYEDITPDF_ENGINE`) ถ้าไม่มีเอนจิน โปรแกรมยังใช้งานได้ปกติ
+เฉพาะเมนูในกลุ่ม "เอกสาร" และลายเซ็นดิจิทัลจะแจ้งว่าไม่พบเอนจิน
 
-### Windows
-
-```bat
-pyinstaller --onefile --windowed --name WnyEditPDF ^
-    --icon wnyeditpdf/assets/logo.ico ^
-    --add-data "fonts;fonts" ^
-    --add-data "wnyeditpdf/assets;wnyeditpdf/assets" ^
-    --hidden-import qrcode ^
-    --hidden-import fontTools ^
-    main.py
-```
-
-### macOS / Linux
+## 4. ทดสอบ
 
 ```bash
-pyinstaller --onefile --windowed --name WnyEditPDF \
-    --icon wnyeditpdf/assets/logo.ico \
-    --add-data "fonts:fonts" \
-    --add-data "wnyeditpdf/assets:wnyeditpdf/assets" \
-    --hidden-import qrcode ^
-    --hidden-import fontTools \
-    main.py
+python -m pytest -q                                  # โปรแกรม (ทดสอบเอนจินด้วยถ้า build แล้ว)
+cd ../pdfcraft && cargo test -p pdfcraft-redact      # ตัวอย่าง: ทดสอบ crate ของเอนจิน
 ```
-
-ไฟล์ที่ได้จะอยู่ที่ `dist/WnyEditPDF.exe` (Windows) — คัดลอกไปเครื่องอื่นได้เลย
 
 ## หมายเหตุ
 
-- โฟลเดอร์ `fonts/` (ฟอนต์ไทย 59 ไฟล์) และ `wnyeditpdf/assets/logo.png` ต้องอยู่ครบตอน build
-- ไลบรารี `qrcode` ถูกฝังไว้ใน `wnyeditpdf/vendor/qrcode` แล้ว จึงใช้งาน QR ได้แม้ไม่ได้ `pip install qrcode` (แต่ยังใส่ `--hidden-import qrcode ^
-    --hidden-import fontTools` ไว้เผื่อกรณีมีติดตั้งในระบบ)
+- โฟลเดอร์ `fonts/` (ฟอนต์ไทย) และ `wnyeditpdf/assets/` ต้องอยู่ครบตอน build
+- ไลบรารี `qrcode` ถูกฝังไว้ใน `wnyeditpdf/vendor/qrcode` แล้ว
+- Windows SmartScreen อาจเตือนเพราะไฟล์ไม่ได้เซ็นดิจิทัล กด **More info → Run anyway**

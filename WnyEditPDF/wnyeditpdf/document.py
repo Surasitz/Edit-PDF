@@ -574,11 +574,14 @@ class PdfDocument:
         out.sort(key=lambda v: v["when"], reverse=True)
         return out
 
-    def save_encrypted(self, path, user_pw, owner_pw=None):
-        """Save with a password (AES-256)."""
+    def save_encrypted(self, path, user_pw, owner_pw=None, permissions=-1):
+        """Save with AES-256. user_pw opens the file ("" = opens without one);
+        owner_pw lifts the restrictions in `permissions` (fitz.PDF_PERM_*
+        flags, -1 = everything allowed)."""
         self.doc.save(path, garbage=3, deflate=True,
                       encryption=fitz.PDF_ENCRYPT_AES_256,
-                      user_pw=user_pw, owner_pw=owner_pw or user_pw)
+                      user_pw=user_pw or "", owner_pw=owner_pw or user_pw,
+                      permissions=permissions)
 
     # ================= rendering / coordinates =================
     def render(self, pno, zoom):
@@ -1973,7 +1976,94 @@ class PdfDocument:
         else:
             target.field_value = "" if value is None else str(value)
         target.update()
+        if field["type"] != "checkbox":
+            self._thai_field_appearance(page, target)
         self._touch(pno)
+
+    @staticmethod
+    def _needs_own_font(text):
+        """Anything beyond Latin-1 - Thai above all - is beyond the base-14
+        fonts (Helv / TiRo / Cour) a form field's default appearance uses."""
+        return any(ord(ch) > 0xFF for ch in text or "")
+
+    def _thai_field_appearance(self, page, widget):
+        """Draw a text field's value with a bundled Thai font.
+
+        PyMuPDF (and the PdfCraft engine) build field appearances with the
+        base-14 fonts, which have no Thai glyphs: a Thai value comes out blank
+        or as '?????'. Here the value is typeset on a scratch page with a real
+        Thai font, and that page's content becomes the field's appearance. The
+        font also goes into the form's /DR under the field's /DA, so a viewer
+        that rebuilds appearances itself picks the same font."""
+        text = widget.field_value or ""
+        if not isinstance(text, str) or not self._needs_own_font(text):
+            return
+        fonts = [p for p in (self.default_thai_font, *self.bundled_fonts.values()) if p]
+        fontpath = next((p for p in fonts if self._font_covers(p, text)), None)
+        if not fontpath:
+            return
+        r = fitz.Rect(widget.rect)
+        w, h = r.width, r.height
+        if w < 2 or h < 2:
+            return
+        lines = text.split("\n") if widget.field_flags & 4096 else [text.replace("\n", " ")]
+        size = widget.text_fontsize or 0
+        if size <= 0:                                # auto size: fill the box
+            size = max(6.0, min(16.0, h / len(lines) * 0.72))
+        try:
+            font = self._cached_font(fontpath)
+            widest = max(font.text_length(s, fontsize=size) for s in lines)
+            if widest > w - 4:
+                size = max(5.0, size * (w - 4) / widest)
+        except Exception:
+            pass
+        color = tuple(widget.text_color or (0, 0, 0))[:3]
+        if len(color) != 3:
+            color = (0, 0, 0)
+
+        tmp = fitz.open()
+        try:
+            tp = tmp.new_page(width=w, height=h)
+            lh = size * 1.15
+            top = (h - lh * len(lines)) / 2 if len(lines) == 1 else 2
+            for i, s in enumerate(lines):
+                tp.insert_text((2, top + lh * (i + 1) - size * 0.28), s, fontsize=size,
+                               fontname="WnyTh", fontfile=fontpath, color=color)
+            self.doc.insert_pdf(tmp)
+        finally:
+            tmp.close()
+        scratch = self.doc.page_count - 1
+        sp = self.doc[scratch]
+        content = sp.read_contents()
+        kind, res = self.doc.xref_get_key(sp.xref, "Resources")
+        if kind == "xref":
+            res = self.doc.xref_object(int(res.split()[0]), compressed=True)
+        self.doc.delete_page(scratch)
+
+        ap = self.doc.get_new_xref()
+        self.doc.update_object(ap, "<</Type/XObject/Subtype/Form/BBox[0 0 %g %g]/Resources %s>>"
+                               % (w, h, res))
+        self.doc.update_stream(ap, content)
+        self.doc.xref_set_key(widget.xref, "AP", "<</N %d 0 R>>" % ap)
+        m = re.search(r"/WnyTh\s+(\d+)\s+0\s+R", res)
+        if m:
+            self.doc.xref_set_key(widget.xref, "DA", "(/WnyTh %g Tf %g %g %g rg)" % ((size,) + color))
+            cat = self.doc.pdf_catalog()
+            kind, acro = self.doc.xref_get_key(cat, "AcroForm")
+            if kind == "xref":
+                self.doc.xref_set_key(int(acro.split()[0]), "DR/Font/WnyTh", "%s 0 R" % m.group(1))
+            elif kind == "dict":                     # an inline /AcroForm << >>
+                self.doc.xref_set_key(cat, "AcroForm/DR/Font/WnyTh", "%s 0 R" % m.group(1))
+
+    def refresh_field_appearances(self):
+        """Redraw every text field holding Thai (after a form-data import)."""
+        # by index, over a snapshot: each redraw adds and drops a scratch page
+        for pno in range(self.page_count):
+            page = self.doc[pno]
+            for w in list(page.widgets() or []):
+                if w.field_type in (fitz.PDF_WIDGET_TYPE_TEXT, fitz.PDF_WIDGET_TYPE_COMBOBOX):
+                    self._thai_field_appearance(page, w)
+        self._touch()
 
     def has_form(self):
         """True if any page carries fillable fields (used to hint the user)."""
@@ -2778,3 +2868,329 @@ class PdfDocument:
                 self._span_cache.pop(pno, None)
         self._touch()
         return replaced
+
+    # ================= whole-document jobs (PdfCraft engine) =================
+    def apply_bytes(self, data):
+        """Swap in a new version of the whole document - the result of an
+        engine job - as ONE undoable step, exactly like undo/redo reloads."""
+        self._snapshot()
+        self._load_bytes(data)
+        self._bake_rotations()
+        self._touch()
+
+    def is_signed(self):
+        """True when the file carries at least one applied digital signature.
+        Saving rewrites the whole file, which breaks every signature in it -
+        the window warns before that happens."""
+        if not self.doc:
+            return False
+        try:
+            if self.doc.get_sigflags() < 1:
+                return False
+            for page in self.doc:
+                for w in page.widgets(types=[fitz.PDF_WIDGET_TYPE_SIGNATURE]):
+                    if self.doc.xref_get_key(w.xref, "V")[0] != "null":
+                        return True
+        except Exception:
+            pass
+        return False
+
+    INFO_KEYS = ("title", "author", "subject", "keywords")
+
+    def metadata(self):
+        meta = (self.doc.metadata or {}) if self.doc else {}
+        return {k: meta.get(k) or "" for k in self.INFO_KEYS}
+
+    def set_metadata(self, values):
+        """Update title / author / subject / keywords (undoable)."""
+        self._snapshot()
+        meta = dict(self.doc.metadata or {})
+        for k in self.INFO_KEYS:
+            if k in values:
+                meta[k] = values[k]
+        self.doc.set_metadata(meta)
+        self._touch()
+
+    def toc(self):
+        """Bookmarks as [[level, title, page(1-based)], ...]."""
+        return [list(t[:3]) for t in self.doc.get_toc(simple=True)] if self.doc else []
+
+    def set_toc(self, toc):
+        """Replace every bookmark (undoable)."""
+        self._snapshot()
+        self.doc.set_toc([[lvl, title, max(1, min(page, self.page_count))]
+                          for lvl, title, page in toc])
+        self._touch()
+
+    # ================= new documents =================
+    def open_bytes(self, data):
+        """Start on a document that has no file yet (blank, clipboard...):
+        the first save asks where to put it."""
+        doc = fitz.open("pdf", data)
+        try:
+            if self.doc:
+                self.doc.close()
+        except Exception:
+            pass
+        self._cleanup_temp_fonts()
+        self.doc = doc
+        self.path = None
+        self.modified = True
+        self._undo.clear()
+        self._redo.clear()
+        self._span_cache.clear()
+        self._fontfile_cache.clear()
+
+    @staticmethod
+    def blank_pdf(width=595.28, height=841.89, count=1):
+        """Bytes of a new PDF with `count` empty pages (A4 portrait by default)."""
+        d = fitz.open()
+        for _ in range(max(1, count)):
+            d.new_page(width=width, height=height)
+        return d.tobytes()
+
+    @staticmethod
+    def image_pdf(image_bytes, dpi=96):
+        """Bytes of a one-page PDF showing the image at its natural size."""
+        pix = fitz.Pixmap(image_bytes)
+        w, h = pix.width * 72 / dpi, pix.height * 72 / dpi
+        d = fitz.open()
+        page = d.new_page(width=w, height=h)
+        page.insert_image(page.rect, stream=image_bytes)
+        return d.tobytes()
+
+    def export_html(self, path):
+        """A web page of the document: headings, paragraphs and pictures from
+        PyMuPDF, with the same Thai clean-up the Word export uses."""
+        import html as _html
+        from .docx_export import repair_text
+
+        def fix(m):
+            return ">" + _html.escape(repair_text(_html.unescape(m.group(1))), quote=False) + "<"
+
+        body = "\n".join(re.sub(r">([^<]+)<", fix, page.get_text("xhtml")) for page in self.doc)
+        title = _html.escape(os.path.splitext(os.path.basename(self.path or "document"))[0])
+        page_css = ("body{font-family:'TH Sarabun New','Sarabun','Leelawadee UI',Tahoma,sans-serif;"
+                    "font-size:16pt;line-height:1.55;max-width:860px;margin:2em auto;padding:0 1em;"
+                    "color:#1f2937}img{max-width:100%;height:auto}"
+                    "div[id^=page]{border-bottom:1px solid #e5e7eb;padding-bottom:1.5em;margin-bottom:1.5em}")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('<!doctype html>\n<html lang="th"><head><meta charset="utf-8">'
+                    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                    "<title>%s</title><style>%s</style></head><body>\n%s\n</body></html>\n"
+                    % (title, page_css, body))
+
+    def is_password_protected(self):
+        """True when the file on disk was encrypted (we opened it with its password)."""
+        try:
+            return bool((self.doc.metadata or {}).get("encryption"))
+        except Exception:
+            return False
+
+    def save_unencrypted(self, path):
+        self.doc.save(path, garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_NONE)
+
+    # ================= pages =================
+    def duplicate_page(self, pno):
+        """Insert a copy of page `pno` right after it (undoable)."""
+        self._snapshot()
+        to = pno + 1 if pno + 1 < self.page_count else -1
+        self.doc.fullcopy_page(pno, to)
+        self._touch()
+
+    LABEL_STYLES = ("D", "r", "R", "a", "A", "")
+
+    def set_page_label(self, start_pno, style, prefix="", first=1):
+        """Number pages from `start_pno` on with a PDF page-label style:
+        D = 1 2 3, r = i ii iii, R = I II III, a = a b c, A = A B C, "" = prefix only."""
+        self._snapshot()
+        rules = [r for r in (self.doc.get_page_labels() or []) if r.get("startpage") != start_pno]
+        rules.append({"startpage": start_pno, "prefix": prefix, "style": style,
+                      "firstpagenum": max(1, int(first))})
+        rules.sort(key=lambda r: r["startpage"])
+        if rules[0]["startpage"] != 0:
+            rules.insert(0, {"startpage": 0, "prefix": "", "style": "D", "firstpagenum": 1})
+        self.doc.set_page_labels(rules)
+        self._touch()
+
+    # ================= headers, footers, background =================
+    HF_SLOTS = ("tl", "tc", "tr", "bl", "bc", "br")
+
+    def header_footer(self, fontpath, texts, size=11, margin=28, pages=None,
+                      bates=None, date_text="", color=(0.15, 0.15, 0.15)):
+        """Write header / footer lines on pages.
+
+        texts : {slot: template} with slots tl tc tr (header) and bl bc br
+                (footer); templates may use {n} {total} {date} {bates}
+        bates : (prefix, first number, digits) - numbers run across the
+                chosen pages in order, the legal-document convention"""
+        self._snapshot()
+        total = self.page_count
+        targets = list(pages) if pages else list(range(total))
+        aligns = {"l": fitz.TEXT_ALIGN_LEFT, "c": fitz.TEXT_ALIGN_CENTER, "r": fitz.TEXT_ALIGN_RIGHT}
+        for k, pno in enumerate(targets):
+            page = self.doc[pno]
+            w, h = page.rect.width, page.rect.height
+            num = ""
+            if bates:
+                prefix, start, digits = bates
+                num = "%s%0*d" % (prefix, max(1, int(digits)), int(start) + k)
+            for slot, tpl in texts.items():
+                if not tpl or slot not in self.HF_SLOTS:
+                    continue
+                s = (tpl.replace("{n}", str(pno + 1)).replace("{total}", str(total))
+                     .replace("{date}", date_text).replace("{bates}", num))
+                if slot[0] == "t":
+                    box = fitz.Rect(margin, margin - size * 0.3, w - margin, margin + size * 2.2)
+                else:
+                    box = fitz.Rect(margin, h - margin - size * 1.9, w - margin, h - margin + size * 0.6)
+                kw = dict(fontsize=size, color=color, align=aligns[slot[1]])
+                if fontpath:
+                    kw.update(fontname="WnyHF", fontfile=fontpath)
+                rc = page.insert_textbox(box, s, **kw)
+                if rc < 0 and fontpath:
+                    kw.pop("fontname")
+                    kw.pop("fontfile")
+                    page.insert_textbox(box, s, **kw)
+        self._touch()
+
+    def add_background(self, color, opacity=1.0, pages=None):
+        """Tint pages like coloured paper (undoable).
+
+        Painted on top with the Multiply blend mode rather than underneath:
+        Word and Google Docs start every page with an opaque white rectangle,
+        which would hide an underlay completely. Multiply turns white into the
+        colour and leaves black text black."""
+        self._snapshot()
+        r, g, b = color
+        op = max(0.05, min(float(opacity), 1.0))
+        name = "WnyMul%03d" % int(round(op * 100))
+        # written by hand: PyMuPDF's Page._set_opacity accepts a blend mode
+        # but never stores it, and without /BM the fill simply covers the text
+        gstate = "<</Type/ExtGState/BM/Multiply/CA 1/ca %g>>" % op
+        for pno in (pages if pages else range(self.page_count)):
+            page = self.doc[pno]
+            page.wrap_contents()               # earlier content cannot leak its CTM
+            kind, res = self.doc.xref_get_key(page.xref, "Resources")
+            if kind == "xref":
+                self.doc.xref_set_key(int(res.split()[0]), "ExtGState/" + name, gstate)
+            else:
+                self.doc.xref_set_key(page.xref, "Resources/ExtGState/" + name, gstate)
+            cmd = "q /%s gs %g %g %g rg -10000 -10000 30000 30000 re f Q" % (name, r, g, b)
+            fitz.TOOLS._insert_contents(page, cmd.encode(), 1)
+        self._touch()
+
+    # ================= comments =================
+    def markup(self, pno, rect, kind, color=(1, 0.92, 0.23)):
+        """Underline / strike out / squiggle the text inside `rect`, following
+        each word so the mark sits on the text, not across the whole box."""
+        if kind == "highlight":
+            return self.highlight(pno, rect, color)
+        self._snapshot()
+        page = self.doc[pno]
+        r = fitz.Rect(rect)
+        quads = [fitz.Rect(wd[:4]).quad for wd in page.get_text("words", clip=r)]
+        add = {"underline": page.add_underline_annot, "strikeout": page.add_strikeout_annot,
+               "squiggly": page.add_squiggly_annot}[kind]
+        annot = add(quads or [r.quad])
+        annot.set_colors(stroke=color)
+        annot.update()
+        self._touch(pno)
+
+    def add_shape(self, pno, p1, p2, kind, color=(0.88, 0.24, 0.24), width=1.5):
+        """A rectangle, oval or straight line comment from a drag."""
+        self._snapshot()
+        page = self.doc[pno]
+        if kind == "line":
+            annot = page.add_line_annot(fitz.Point(p1), fitz.Point(p2))
+        else:
+            r = fitz.Rect(fitz.Point(p1), fitz.Point(p2)).normalize()
+            annot = page.add_rect_annot(r) if kind == "rect" else page.add_circle_annot(r)
+        annot.set_colors(stroke=color)
+        annot.set_border(width=width)
+        annot.set_info(title="WnyEditPDF")
+        annot.update()
+        self._touch(pno)
+
+    ANNOT_TYPES = ("Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine",
+                   "Highlight", "Underline", "Squiggly", "StrikeOut", "Stamp", "Caret", "Ink",
+                   "FileAttachment", "Sound")
+
+    def all_comments(self):
+        """Every comment-like annotation: [(page, type, author, text, date)]."""
+        out = []
+        for pno in range(self.page_count):
+            page = self.doc[pno]
+            for a in page.annots() or []:
+                t = a.type[1]
+                if t not in self.ANNOT_TYPES:
+                    continue
+                info = a.info or {}
+                out.append((pno, t, info.get("title", ""), info.get("content", ""),
+                            info.get("modDate") or info.get("creationDate") or ""))
+        return out
+
+    # ================= redaction =================
+    def redact_text(self, query, fill=(0, 0, 0), pages=None):
+        """Delete every occurrence of `query` for good (the text under each hit
+        is removed, a box is drawn in its place). Returns the number removed."""
+        hits = [(pno, self.find_on_page(pno, query)) for pno in
+                (pages if pages else range(self.page_count))]
+        hits = [(pno, rects) for pno, rects in hits if rects]
+        if not hits:
+            return 0
+        self._snapshot()
+        n = 0
+        for pno, rects in hits:
+            page = self.doc[pno]
+            self._clear_stale_redacts(page)
+            for r in rects:
+                page.add_redact_annot(r, fill=fill)
+                n += 1
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
+        self._touch()
+        return n
+
+    def redact_pages(self, pages, fill=(0, 0, 0)):
+        """Wipe whole pages: text, pictures, drawings and comments go for good."""
+        self._snapshot()
+        for pno in pages:
+            page = self.doc[pno]
+            for a in list(page.annots() or []):
+                page.delete_annot(a)
+            self._clear_stale_redacts(page)
+            page.add_redact_annot(page.rect, fill=fill)
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_REMOVE,
+                                  graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
+        self._touch()
+
+    # ================= form fields =================
+    FIELD_TYPES = {"text": fitz.PDF_WIDGET_TYPE_TEXT, "checkbox": fitz.PDF_WIDGET_TYPE_CHECKBOX,
+                   "combobox": fitz.PDF_WIDGET_TYPE_COMBOBOX,
+                   "signature": fitz.PDF_WIDGET_TYPE_SIGNATURE}
+
+    def add_form_field(self, pno, rect, kind, name=None, choices=None):
+        """Add an empty fillable field over `rect` (undoable)."""
+        existing = {w.field_name for p in self.doc for w in (p.widgets() or [])}
+        if not name:
+            i = 1
+            while "%s_%d" % (kind, i) in existing:
+                i += 1
+            name = "%s_%d" % (kind, i)
+        self._snapshot()
+        page = self.doc[pno]
+        w = fitz.Widget()
+        w.field_type = self.FIELD_TYPES[kind]
+        w.field_name = name
+        w.rect = fitz.Rect(rect).normalize()
+        w.border_color = (0.55, 0.6, 0.7)
+        w.border_width = 0.8
+        w.fill_color = (0.93, 0.95, 1.0)
+        if kind == "text":
+            w.text_fontsize = 0
+        elif kind == "combobox":
+            w.choice_values = list(choices or ["-"])
+            w.field_value = w.choice_values[0]
+        page.add_widget(w)
+        self._touch(pno)
+        return name

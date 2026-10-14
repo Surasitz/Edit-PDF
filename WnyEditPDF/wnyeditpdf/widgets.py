@@ -19,13 +19,13 @@ from PyQt6.QtGui import (
     QImage, QPainter, QColor, QPen, QFontDatabase, QFont, QPixmap, QIcon,
     QFontMetrics, QDesktopServices
 )
-from PyQt6.QtCore import Qt, QRect, QPoint, QBuffer, QIODevice, QSize, QUrl
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QBuffer, QIODevice, QSize, QUrl
 
 from .config import (
     ADOBE_BLUE, APP_NAME,
     MODE_VIEW, MODE_ADD_TEXT, MODE_EDIT_TEXT, MODE_MOVE_TEXT, MODE_DELETE_TEXT,
     MODE_HIGHLIGHT, MODE_SIGNATURE, MODE_IMAGE, MODE_WHITEOUT,
-    MODE_PEN, MODE_COMMENT, MODE_LINK,
+    MODE_PEN, MODE_COMMENT, MODE_LINK, MODE_FORM,
 )
 
 TEXT_HANDLE_COLOR = QColor("#0f9d58")   # text resize handle (green)
@@ -1768,7 +1768,7 @@ class PageView(QLabel):
         elif m.mode in (MODE_SIGNATURE, MODE_IMAGE):
             self.cursor_pos = pos
             self.update()
-        elif (m.mode in (MODE_HIGHLIGHT, MODE_WHITEOUT, MODE_LINK)
+        elif (m.mode in (MODE_HIGHLIGHT, MODE_WHITEOUT, MODE_LINK, MODE_FORM)
               or (m.mode == MODE_COMMENT and getattr(m, 'comment_kind', 'note') != 'note')) and self.drag_start:
             self.drag_rect = QRect(self.drag_start, pos).normalized()
             self.update()
@@ -1845,7 +1845,7 @@ class PageView(QLabel):
                 else:
                     m.status("จับไม่โดน — กดค้างให้ตรงกรอบเส้นประ (ข้อความ) "
                              "หรือกรอบสีส้ม (รูป/ลายเซ็น) / ลากมุมเพื่อย่อ-ขยาย")
-        elif m.mode in (MODE_HIGHLIGHT, MODE_WHITEOUT, MODE_LINK):
+        elif m.mode in (MODE_HIGHLIGHT, MODE_WHITEOUT, MODE_LINK, MODE_FORM):
             self.drag_start = pos
         super().mousePressEvent(ev)
 
@@ -1911,7 +1911,7 @@ class PageView(QLabel):
                 pt = self.to_pdf_point(pos)
                 if pt:
                     m.select_item(pt)
-        elif (m.mode in (MODE_HIGHLIGHT, MODE_WHITEOUT, MODE_LINK)
+        elif (m.mode in (MODE_HIGHLIGHT, MODE_WHITEOUT, MODE_LINK, MODE_FORM)
               or (m.mode == MODE_COMMENT and getattr(m, 'comment_kind', 'note') != 'note')) and self.drag_start:
             p1 = self.to_pdf_point(self.drag_start)
             p2 = self.to_pdf_point(pos)
@@ -1926,7 +1926,9 @@ class PageView(QLabel):
                     m.apply_whiteout(fitz.Rect(p1, p2).normalize())
                 elif mode == MODE_LINK:
                     m.add_link_ui(fitz.Rect(p1, p2).normalize())
-                else:                       # comment arrow / textbox
+                elif mode == MODE_FORM:
+                    m.add_form_field_ui(fitz.Rect(p1, p2).normalize())
+                else:                       # comment arrow / textbox / shapes
                     m.place_comment_drag(p1, p2)
         super().mouseReleaseEvent(ev)
 
@@ -1957,7 +1959,29 @@ class PageView(QLabel):
             painter.fillRect(hr, color)
             painter.drawRect(hr)
 
+    def _drag_end(self, rect):
+        """The corner of the drag box opposite the press point."""
+        s = self.drag_start
+        return QPoint(rect.right() if s.x() <= rect.left() else rect.left(),
+                      rect.bottom() if s.y() <= rect.top() else rect.top())
+
+    def _paint_shadow(self):
+        """A soft shadow under the page so it lifts off the light canvas."""
+        pm = self.pixmap()
+        if pm is None or pm.isNull():
+            return
+        ox, oy = self._offsets()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        for grow, alpha in ((7, 8), (5, 12), (3, 18), (1, 30)):
+            p.setBrush(QColor(15, 23, 42, alpha))
+            p.drawRoundedRect(QRectF(ox - grow, oy - grow + 2, pm.width() + 2 * grow,
+                                     pm.height() + 2 * grow), grow + 1, grow + 1)
+        p.end()
+
     def paintEvent(self, ev):
+        self._paint_shadow()
         super().paintEvent(ev)
         m = self.main
         if self.pixmap() is None:
@@ -2091,6 +2115,19 @@ class PageView(QLabel):
             elif m.mode == MODE_COMMENT and comment_kind == "textbox":
                 painter.setPen(QPen(QColor(ADOBE_BLUE), 1, Qt.PenStyle.DashLine))
                 painter.fillRect(self.drag_rect, QColor(255, 245, 200, 150))
+                painter.drawRect(self.drag_rect)
+            elif m.mode == MODE_COMMENT and comment_kind in ("rect", "oval", "line"):
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setPen(QPen(QColor("#e03e3e"), 2))
+                if comment_kind == "rect":
+                    painter.drawRect(self.drag_rect)
+                elif comment_kind == "oval":
+                    painter.drawEllipse(self.drag_rect)
+                else:
+                    painter.drawLine(self.drag_start, self._drag_end(self.drag_rect))
+            elif m.mode == MODE_FORM:
+                painter.setPen(QPen(QColor("#8e4ee6"), 1, Qt.PenStyle.DashLine))
+                painter.fillRect(self.drag_rect, QColor(142, 78, 230, 35))
                 painter.drawRect(self.drag_rect)
             else:                                   # highlight
                 painter.setPen(QColor(255, 180, 0))
