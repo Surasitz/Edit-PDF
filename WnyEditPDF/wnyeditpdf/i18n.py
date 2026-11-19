@@ -554,6 +554,65 @@ EN = {
     "สร้างใบรับรองไม่สำเร็จ:\n%s": "Could not create the digital ID:\n%s",
     "สร้างใบรับรองแล้ว:\n%s\n\nเก็บไฟล์นี้และรหัสผ่านไว้ให้ดี":
         "Digital ID created:\n%s\n\nKeep this file and its password safe.",
+    # ----- Windows file association ("Open with") -----
+    "🔗 ตั้งให้เปิดไฟล์ PDF ด้วยโปรแกรมนี้...":
+        "🔗 Open PDF files with this program...",
+    "เปิดไฟล์ PDF ด้วยโปรแกรมนี้": "Open PDF files with this program",
+    "ฟีเจอร์นี้ใช้ได้บน Windows เท่านั้น": "This feature is Windows only.",
+    "ลงทะเบียนโปรแกรมกับ Windows เพื่อให้คลิกขวาไฟล์ PDF "
+    "แล้วเลือก “เปิดด้วย (Open with)” → WnyEditPDF ได้ "
+    "หรือตั้งเป็นโปรแกรมเริ่มต้นสำหรับไฟล์ PDF":
+        "Register the program with Windows so you can right-click a PDF and "
+        "choose “Open with” → WnyEditPDF, or make it your default PDF app.",
+    "หมายเหตุ: กำลังรันจากซอร์สโค้ด (Python) "
+    "การลงทะเบียนจะชี้มาที่สคริปต์นี้ "
+    "ถ้าต้องการใช้จริงควรลงทะเบียนจากไฟล์ WnyEditPDF.exe ที่ build แล้ว":
+        "Note: running from source (Python), so the registration points at this "
+        "script. For everyday use, register from the built WnyEditPDF.exe instead.",
+    "➕ เพิ่มใน “เปิดด้วย (Open with)”": "➕ Add to the “Open with” menu",
+    "⭐ ตั้งเป็นโปรแกรมเริ่มต้นของไฟล์ PDF...": "⭐ Make it the default PDF app...",
+    "⚙ เปิดหน้าตั้งค่า “แอปเริ่มต้น” ของ Windows":
+        "⚙ Open Windows “Default apps” settings",
+    "🗑 เอาออกจากรายการ": "🗑 Remove from the list",
+    "🔄 อัปเดตการลงทะเบียน": "🔄 Update the registration",
+    "✅ ลงทะเบียนแล้ว (กดเพื่อลงทะเบียนซ้ำ)": "✅ Registered (click to re-register)",
+    "สถานะ: ยังไม่ได้ลงทะเบียน — "
+    "Windows ยังไม่รู้จักโปรแกรมนี้สำหรับไฟล์ PDF":
+        "Status: not registered — Windows does not list this program for PDF files yet.",
+    "สถานะ: ลงทะเบียนไว้แล้ว แต่ข้อมูลไม่ตรงกับโปรแกรมนี้ "
+    "(ย้ายไฟล์ หรืออัปเดตเวอร์ชัน) — กดปุ่มด้านล่างเพื่ออัปเดต":
+        "Status: registered, but not with what this copy would write "
+        "(the file moved, or an update changed it) — click below to update it.",
+    "สถานะ: ลงทะเบียนแล้ว — "
+    "คลิกขวาไฟล์ PDF จะเห็น WnyEditPDF ใน “เปิดด้วย”":
+        "Status: registered — right-click a PDF and WnyEditPDF is in “Open with”.",
+    "ไฟล์ PDF เปิดด้วยโปรแกรมนี้เป็นค่าเริ่มต้นอยู่แล้ว":
+        "PDF files already open with this program by default.",
+    "โปรแกรมเริ่มต้นของไฟล์ PDF ขณะนี้:": "Current default PDF app:",
+    "ลงทะเบียนไม่สำเร็จ:": "Could not register:",
+    "เอาออกไม่สำเร็จ:": "Could not remove:",
+    "ลงทะเบียนกับ Windows แล้ว — "
+    "คลิกขวาไฟล์ PDF → เปิดด้วย → WnyEditPDF":
+        "Registered with Windows — right-click a PDF → Open with → WnyEditPDF",
+    "เอา WnyEditPDF ออกจากรายการโปรแกรมที่เปิดไฟล์ PDF?":
+        "Remove WnyEditPDF from the list of programs that open PDF files?",
+    "เอาออกจากรายการแล้ว": "Removed from the list.",
+    "Windows ไม่อนุญาตให้โปรแกรมตั้งค่าเริ่มต้นเอง "
+    "กรุณาตั้งจากหน้าตั้งค่าของ Windows":
+        "Windows does not let a program make itself the default. "
+        "Please set it from the Windows settings page.",
+    "ให้ WnyEditPDF เปิดไฟล์ PDF จาก Windows ได้เลยไหม?":
+        "Let WnyEditPDF open PDF files from Windows?",
+    "จะเพิ่มโปรแกรมนี้ในเมนู “เปิดด้วย (Open with)” ของไฟล์ PDF "
+    "(ไม่เปลี่ยนโปรแกรมเริ่มต้นเดิม และเอาออกได้ที่ ไฟล์ → "
+    "ตั้งให้เปิดไฟล์ PDF ด้วยโปรแกรมนี้)":
+        "This adds the program to the “Open with” menu for PDF files. "
+        "Your current default app is left alone, and you can remove it again "
+        "from File → Open PDF files with this program.",
+    "เพิ่มเลย": "Add it",
+    "ไม่เป็นไร": "Not now",
+    "ไม่พบไฟล์:": "File not found:",
+    "เปิดได้เฉพาะไฟล์ PDF:": "Only PDF files can be opened:",
     # ----- more menus -----
     "🔒 ล็อกด้วยรหัสผ่าน / จำกัดสิทธิ์...": "🔒 Protect with a password / restrictions...",
     "🖨 พิมพ์...": "🖨 Print...",

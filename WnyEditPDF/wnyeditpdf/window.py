@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import (
     QAction, QPixmap, QImage, QColor, QIcon, QKeySequence, QPalette
 )
-from PyQt6.QtCore import Qt, QSize, QSettings, QLocale
+from PyQt6.QtCore import Qt, QSize, QSettings, QLocale, QTimer
 
 from .config import (
     APP_NAME, VERSION, ORG_NAME, STYLE, CANVAS_GRAY, resource_path,
@@ -39,6 +39,8 @@ from .shell import ToolPanel
 from .icons import icon
 from . import catalog
 from . import engine
+from . import fileassoc
+from .single_instance import InstanceServer, send_to_running_instance
 from .widgets import (PageView, TextEditDialog, SignatureDialog, CommentDialog,
                       SearchBar,
                       ThumbnailList, symbol_image, qr_png_bytes,
@@ -264,6 +266,9 @@ class MainWindow(DocToolsMixin, QMainWindow):
         self._act(m_file, self.T("ดึงข้อความทั้งไฟล์เป็น .txt..."), self.export_text)
         m_file.addSeparator()
         self._act(m_file, self.T("🖨 พิมพ์..."), self.print_document, "Ctrl+P")
+        m_file.addSeparator()
+        self._act(m_file, self.T("🔗 ตั้งให้เปิดไฟล์ PDF ด้วยโปรแกรมนี้..."),
+                  self.manage_file_association)
         m_file.addSeparator()
         self._act(m_file, self.T("ออกจากโปรแกรม"), self.close, "Ctrl+Q")
 
@@ -900,6 +905,197 @@ class MainWindow(DocToolsMixin, QMainWindow):
                         f"คลิกช่องในโหมดแก้ข้อความเพื่อกรอก หรือใช้เมนู เครื่องมือ")
         else:
             self.status(f"เปิดแล้ว: {os.path.basename(path)}  ({self.pdf.page_count} หน้า)")
+
+    # ======================================================
+    #  opening a file Windows handed us ("Open with" / double-click)
+    # ======================================================
+    def open_external_path(self, path):
+        """Open a PDF that came from the command line or another launch of the
+        program. Brings this window to the front first, the way a document
+        opened from Explorer is expected to appear."""
+        self.raise_()
+        self.activateWindow()
+        if not path:
+            return
+        if not os.path.exists(path):
+            QMessageBox.warning(self, APP_NAME,
+                                self.T("ไม่พบไฟล์:") + "\n" + path)
+            return
+        if not path.lower().endswith(".pdf"):
+            QMessageBox.warning(self, APP_NAME,
+                                self.T("เปิดได้เฉพาะไฟล์ PDF:") + "\n" + path)
+            return
+        if not self.confirm_discard():
+            return
+        self._open_path(path)
+
+    # ======================================================
+    #  "Open with WnyEditPDF" — Windows file association
+    # ======================================================
+    def manage_file_association(self):
+        """Register the program with Windows so .pdf files can be opened with
+        it from Explorer ("Open with", or as the default PDF app)."""
+        T = self.T
+        if not fileassoc.IS_WINDOWS:
+            QMessageBox.information(self, APP_NAME,
+                                    T("ฟีเจอร์นี้ใช้ได้บน Windows เท่านั้น"))
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(T("เปิดไฟล์ PDF ด้วยโปรแกรมนี้"))
+        dlg.setMinimumWidth(580)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(10)
+
+        head = QLabel(T("ลงทะเบียนโปรแกรมกับ Windows เพื่อให้คลิกขวาไฟล์ PDF "
+                        "แล้วเลือก “เปิดด้วย (Open with)” → WnyEditPDF ได้ "
+                        "หรือตั้งเป็นโปรแกรมเริ่มต้นสำหรับไฟล์ PDF"))
+        head.setWordWrap(True)
+        lay.addWidget(head)
+
+        status = QLabel()
+        status.setWordWrap(True)
+        status.setStyleSheet("QLabel { background:#f6f7f9; border:1px solid #d5d7db;"
+                             " border-radius:6px; padding:9px 11px; }")
+        lay.addWidget(status)
+
+        if not fileassoc.is_frozen():
+            warn = QLabel(T("หมายเหตุ: กำลังรันจากซอร์สโค้ด (Python) "
+                            "การลงทะเบียนจะชี้มาที่สคริปต์นี้ "
+                            "ถ้าต้องการใช้จริงควรลงทะเบียนจากไฟล์ WnyEditPDF.exe ที่ build แล้ว"))
+            warn.setWordWrap(True)
+            warn.setStyleSheet("QLabel { color:#8a5a00; }")
+            lay.addWidget(warn)
+
+        btn_reg = QPushButton(T("➕ เพิ่มใน “เปิดด้วย (Open with)”"))
+        btn_default = QPushButton(T("⭐ ตั้งเป็นโปรแกรมเริ่มต้นของไฟล์ PDF..."))
+        btn_settings = QPushButton(T("⚙ เปิดหน้าตั้งค่า “แอปเริ่มต้น” ของ Windows"))
+        btn_unreg = QPushButton(T("🗑 เอาออกจากรายการ"))
+        for b in (btn_default, btn_settings, btn_unreg):
+            b.setStyleSheet("QPushButton { background:#eef0f3; color:#2c2c2c; }"
+                            "QPushButton:hover { background:#e2e5e9; }")
+        for b in (btn_reg, btn_default, btn_settings, btn_unreg):
+            lay.addWidget(b)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        btn_close = QPushButton(T("ปิด"))
+        btn_close.setStyleSheet("QPushButton { background:#eef0f3; color:#2c2c2c; }")
+        row.addWidget(btn_close)
+        lay.addLayout(row)
+
+        def refresh():
+            reg = fileassoc.is_registered()
+            stale = fileassoc.is_stale()
+            default = fileassoc.is_default()
+            lines = []
+            if not reg:
+                lines.append(T("สถานะ: ยังไม่ได้ลงทะเบียน — "
+                               "Windows ยังไม่รู้จักโปรแกรมนี้สำหรับไฟล์ PDF"))
+            elif stale:
+                lines.append(T("สถานะ: ลงทะเบียนไว้แล้ว แต่ข้อมูลไม่ตรงกับโปรแกรมนี้ "
+                               "(ย้ายไฟล์ หรืออัปเดตเวอร์ชัน) — กดปุ่มด้านล่างเพื่ออัปเดต"))
+            else:
+                lines.append(T("สถานะ: ลงทะเบียนแล้ว — "
+                               "คลิกขวาไฟล์ PDF จะเห็น WnyEditPDF ใน “เปิดด้วย”"))
+            if default:
+                lines.append(T("ไฟล์ PDF เปิดด้วยโปรแกรมนี้เป็นค่าเริ่มต้นอยู่แล้ว"))
+            else:
+                cur = fileassoc.default_handler_name()
+                if cur:
+                    lines.append(T("โปรแกรมเริ่มต้นของไฟล์ PDF ขณะนี้:") + " " + cur)
+            status.setText("\n".join(lines))
+            btn_reg.setText(T("🔄 อัปเดตการลงทะเบียน") if stale
+                            else (T("✅ ลงทะเบียนแล้ว (กดเพื่อลงทะเบียนซ้ำ)") if reg
+                                  else T("➕ เพิ่มใน “เปิดด้วย (Open with)”")))
+            btn_unreg.setEnabled(reg)
+            btn_default.setEnabled(reg)
+
+        def do_register():
+            err = fileassoc.register(self.lang)
+            if err:
+                QMessageBox.critical(self, APP_NAME,
+                                     T("ลงทะเบียนไม่สำเร็จ:") + "\n" + err)
+            else:
+                self.status(T("ลงทะเบียนกับ Windows แล้ว — "
+                              "คลิกขวาไฟล์ PDF → เปิดด้วย → WnyEditPDF"))
+            refresh()
+
+        def do_unregister():
+            if QMessageBox.question(
+                    self, APP_NAME,
+                    T("เอา WnyEditPDF ออกจากรายการโปรแกรมที่เปิดไฟล์ PDF?")
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            err = fileassoc.unregister()
+            if err:
+                QMessageBox.critical(self, APP_NAME,
+                                     T("เอาออกไม่สำเร็จ:") + "\n" + err)
+            else:
+                self.status(T("เอาออกจากรายการแล้ว"))
+            refresh()
+
+        def do_default():
+            if not fileassoc.is_registered():
+                do_register()
+            sample = self.pdf.path if self.pdf.is_open() else None
+            err = fileassoc.open_with_dialog(
+                sample, int(self.winId()) if self.winId() else 0)
+            if err == "cancelled":
+                pass
+            elif err:
+                QMessageBox.information(
+                    self, APP_NAME,
+                    T("Windows ไม่อนุญาตให้โปรแกรมตั้งค่าเริ่มต้นเอง "
+                      "กรุณาตั้งจากหน้าตั้งค่าของ Windows") + "\n\n" + err)
+                fileassoc.open_default_apps_settings()
+            refresh()
+
+        def do_settings():
+            err = fileassoc.open_default_apps_settings()
+            if err:
+                QMessageBox.warning(self, APP_NAME, err)
+
+        btn_reg.clicked.connect(do_register)
+        btn_unreg.clicked.connect(do_unregister)
+        btn_default.clicked.connect(do_default)
+        btn_settings.clicked.connect(do_settings)
+        btn_close.clicked.connect(dlg.accept)
+        refresh()
+        dlg.exec()
+
+    def maybe_offer_association(self):
+        """Once per installation, offer to register as a PDF handler — the way
+        a freshly installed PDF reader asks. Never asks a second time."""
+        if not fileassoc.IS_WINDOWS or not fileassoc.is_frozen():
+            return
+        if self.settings.value("assoc_asked", False, type=bool):
+            return
+        if fileassoc.is_registered():
+            self.settings.setValue("assoc_asked", True)
+            return
+        T = self.T
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(APP_NAME)
+        box.setText(T("ให้ WnyEditPDF เปิดไฟล์ PDF จาก Windows ได้เลยไหม?"))
+        box.setInformativeText(T(
+            "จะเพิ่มโปรแกรมนี้ในเมนู “เปิดด้วย (Open with)” ของไฟล์ PDF "
+            "(ไม่เปลี่ยนโปรแกรมเริ่มต้นเดิม และเอาออกได้ที่ ไฟล์ → "
+            "ตั้งให้เปิดไฟล์ PDF ด้วยโปรแกรมนี้)"))
+        yes = box.addButton(T("เพิ่มเลย"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(T("ไม่เป็นไร"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(yes)
+        box.exec()
+        self.settings.setValue("assoc_asked", True)
+        if box.clickedButton() is yes:
+            err = fileassoc.register(self.lang)
+            if err:
+                QMessageBox.critical(self, APP_NAME,
+                                     T("ลงทะเบียนไม่สำเร็จ:") + "\n" + err)
+            else:
+                self.status(T("ลงทะเบียนกับ Windows แล้ว — "
+                              "คลิกขวาไฟล์ PDF → เปิดด้วย → WnyEditPDF"))
 
     def save_pdf(self):
         if not self.pdf.is_open():
@@ -2543,13 +2739,45 @@ class MainWindow(DocToolsMixin, QMainWindow):
                               f"<p>{engine_line}</p>")
 
 
+def pdf_from_argv(argv):
+    """The PDF Windows asked us to open, from `WnyEditPDF.exe "C:\\file.pdf"`.
+
+    Returns an absolute path, or None when we were started with no file."""
+    for arg in argv[1:]:
+        if arg.startswith("-") or arg.startswith("/"):
+            continue                       # a switch, not a file
+        if arg.lower().endswith(".pdf"):
+            return os.path.abspath(arg)
+    return None
+
+
 def run():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+
+    # "Open with" while a window is already up: hand the file to that window
+    # and stop here, so one file does not mean one more copy of the program
+    initial = pdf_from_argv(sys.argv)
+    if initial and send_to_running_instance(initial):
+        return
+
     QLocale.setDefault(_ARABIC_LOCALE)   # Arabic digits app-wide
     app.setStyleSheet(STYLE)
     win = MainWindow()
     win.show()
+
+    # listen for files sent by later launches of the program
+    server = InstanceServer(win)
+    if server.is_listening():
+        server.opened.connect(win.open_external_path)
+
+    if initial:
+        # after show(), so any password prompt has a parent window to sit on
+        QTimer.singleShot(0, lambda: win.open_external_path(initial))
+    else:
+        QTimer.singleShot(500, win.maybe_offer_association)
+
     sys.exit(app.exec())
 
 

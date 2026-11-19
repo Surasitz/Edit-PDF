@@ -14,6 +14,8 @@ WnyEditPDF — จุดเริ่มต้นโปรแกรม (entry poi
   wnyeditpdf/shell.py     แผง "เครื่องมือทั้งหมด" ด้านซ้าย
   wnyeditpdf/icons.py     ไอคอนเส้น (Lucide) ลงสีตามหมวด
   wnyeditpdf/engine.py    สะพานเชื่อมเอนจิน PdfCraft (Rust, ซอร์สใน ../pdfcraft)
+  wnyeditpdf/fileassoc.py ลงทะเบียนกับ Windows ให้ "เปิดด้วย (Open with)" ไฟล์ PDF ได้
+  wnyeditpdf/single_instance.py  ส่งไฟล์ให้หน้าต่างที่เปิดอยู่ แทนการเปิดโปรแกรมซ้ำ
   wnyeditpdf/i18n.py      คำแปลไทย/อังกฤษ
   wnyeditpdf/assets/      ไอคอน/โลโก้
   wnyeditpdf/vendor/      ไลบรารีที่ฝังมา (qrcode)

@@ -35,3 +35,6 @@ Thumbs.db
 # Test / scratch output
 *.log
 /tmp/
+
+# Bundled PdfCraft engine binary (34 MB, recovered from the build)
+engine/
