@@ -2765,7 +2765,10 @@ def run():
     QLocale.setDefault(_ARABIC_LOCALE)   # Arabic digits app-wide
     app.setStyleSheet(STYLE)
     win = MainWindow()
-    win.show()
+    # start filling the screen: a PDF page is tall, and the tool panel and the
+    # thumbnails each want their share of the width. resize() above stays as
+    # the size the window returns to when it is restored down.
+    win.showMaximized()
 
     # listen for files sent by later launches of the program
     server = InstanceServer(win)
