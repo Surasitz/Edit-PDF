@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QFileDialog, QMessageBox, QColorDialog, QToolButton,
     QListWidget, QListWidgetItem, QMenu, QCheckBox, QSlider, QGridLayout,
     QRadioButton, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
-    QAbstractItemView, QApplication
+    QAbstractItemView, QApplication, QProgressDialog
 )
 from PyQt6.QtGui import (
     QImage, QPainter, QColor, QPen, QFontDatabase, QFont, QPixmap, QIcon,
@@ -1170,11 +1170,445 @@ class CompressDialog(QDialog):
         e.accept()
 
 
+def _section(text):
+    """A small bold caption, the way the print dialog groups its settings."""
+    lb = QLabel(text)
+    lb.setStyleSheet("font-weight: 600; color: #2c2c2c; margin-top: 2px;")
+    return lb
+
+
 def _hline():
     line = QLabel()
     line.setFixedHeight(1)
     line.setStyleSheet("background: #e1e3e6;")
     return line
+
+
+def parse_page_ranges(text, n):
+    """"1-5, 8, 11-" -> [0..4, 7, 10..n-1]; None when the text makes no sense.
+
+    Page numbers are what the user sees (1-based); the result is indexes.
+    Out-of-range numbers are clipped rather than refused, so a stray "99" on a
+    10-page file prints to the end instead of throwing the whole job away."""
+    out = []
+    for part in (text or "").replace("–", "-").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            a, b = a.strip(), b.strip()
+            if a and not a.isdigit():
+                return None
+            if b and not b.isdigit():
+                return None
+            start = int(a) if a else 1
+            end = int(b) if b else n
+        elif part.isdigit():
+            start = end = int(part)
+        else:
+            return None
+        if start > end:
+            start, end = end, start
+        start, end = max(1, start), min(n, end)
+        if start > n or end < 1:
+            continue
+        out.extend(range(start - 1, end))
+    seen, pages = set(), []
+    for p in out:                      # keep the order asked for, drop repeats
+        if p not in seen:
+            seen.add(p)
+            pages.append(p)
+    return pages or None
+
+
+class PrintDialog(QDialog):
+    """One window for printing: printer, pages, sizing and a live preview.
+
+    The previous version handed the job to Qt's preview dialog, whose print
+    button opened the system print dialog on top of it — two windows showing
+    two previews for one print. Acrobat gets this right with a single window,
+    so this is that window: every setting on the left, the page as it will
+    come out of the printer on the right, and the print button prints.
+
+    The preview and the printer are fed by one routine, `_draw_page`, so the
+    paper the user holds matches what the preview showed.
+    """
+
+    FIT, SHRINK, ACTUAL, CUSTOM = "fit", "shrink", "actual", "custom"
+
+    def __init__(self, parent=None, tr=None, doc=None, current=0, doc_name=""):
+        super().__init__(parent)
+        from PyQt6.QtPrintSupport import QPrinter, QPrinterInfo
+        T = tr or (lambda s: s)
+        self._T = T
+        self.doc = doc
+        self.current = current
+        self.n = doc.page_count
+        self.preview_at = 0            # index into the selected page list
+        self.printed = 0               # pages actually sent, for the caller
+
+        self.printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        self.printer.setDocName(doc_name or APP_NAME)
+
+        self.setWindowTitle(T("พิมพ์") + (" — " + doc_name if doc_name else ""))
+        self.setMinimumSize(900, 640)
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+
+        # ---------------- printer ----------------
+        top = QHBoxLayout()
+        top.addWidget(QLabel(T("เครื่องพิมพ์:")))
+        self.cb_printer = QComboBox()
+        names = [p.printerName() for p in QPrinterInfo.availablePrinters()]
+        self.cb_printer.addItems(names)
+        default = QPrinterInfo.defaultPrinter().printerName()
+        if default in names:
+            self.cb_printer.setCurrentText(default)
+        self.cb_printer.setMinimumWidth(260)
+        top.addWidget(self.cb_printer, 1)
+        self.btn_setup = QPushButton(T("ตั้งค่าหน้ากระดาษ..."))
+        top.addWidget(self.btn_setup)
+        top.addSpacing(14)
+        top.addWidget(QLabel(T("จำนวนชุด:")))
+        self.sp_copies = QSpinBox()
+        self.sp_copies.setRange(1, 999)
+        self.sp_copies.setFixedWidth(64)
+        top.addWidget(self.sp_copies)
+        self.chk_gray = QCheckBox(T("พิมพ์ขาวดำ"))
+        top.addWidget(self.chk_gray)
+        root.addLayout(top)
+        root.addWidget(_hline())
+
+        body = QHBoxLayout()
+        body.setSpacing(16)
+        root.addLayout(body, 1)
+
+        # ---------------- left: what and how ----------------
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        body.addLayout(left)
+
+        left.addWidget(_section(T("หน้าที่จะพิมพ์")))
+        self.rb_all = QRadioButton(T("ทั้งหมด"))
+        self.rb_cur = QRadioButton(T("หน้าปัจจุบัน (หน้า %d)") % (current + 1))
+        self.rb_rng = QRadioButton(T("ระบุหน้า:"))
+        self.rb_all.setChecked(True)
+        left.addWidget(self.rb_all)
+        left.addWidget(self.rb_cur)
+        rng_row = QHBoxLayout()
+        rng_row.addWidget(self.rb_rng)
+        self.ed_rng = QLineEdit()
+        self.ed_rng.setPlaceholderText("1-5, 8, 11-13")
+        self.ed_rng.setEnabled(False)
+        rng_row.addWidget(self.ed_rng, 1)
+        left.addLayout(rng_row)
+        self.lb_count = QLabel()
+        self.lb_count.setStyleSheet("color:#6b7078;")
+        left.addWidget(self.lb_count)
+
+        left.addSpacing(8)
+        left.addWidget(_section(T("ขนาดและการจัดวาง")))
+        self.rb_shrink = QRadioButton(T("ย่อเฉพาะหน้าที่ใหญ่เกินกระดาษ"))
+        self.rb_fit = QRadioButton(T("พอดีกระดาษ (ย่อหรือขยายให้เต็ม)"))
+        self.rb_actual = QRadioButton(T("ขนาดจริง (100%)"))
+        self.rb_custom = QRadioButton(T("กำหนดเอง:"))
+        self.rb_shrink.setChecked(True)
+        left.addWidget(self.rb_shrink)
+        left.addWidget(self.rb_fit)
+        left.addWidget(self.rb_actual)
+        cus = QHBoxLayout()
+        cus.addWidget(self.rb_custom)
+        self.sp_scale = QSpinBox()
+        self.sp_scale.setRange(10, 400)
+        self.sp_scale.setValue(100)
+        self.sp_scale.setSuffix(" %")
+        self.sp_scale.setEnabled(False)
+        self.sp_scale.setFixedWidth(90)
+        cus.addWidget(self.sp_scale)
+        cus.addStretch(1)
+        left.addLayout(cus)
+
+        left.addSpacing(8)
+        left.addWidget(_section(T("แนวกระดาษ")))
+        orow = QHBoxLayout()
+        self.rb_auto = QRadioButton(T("อัตโนมัติ"))
+        self.rb_port = QRadioButton(T("แนวตั้ง"))
+        self.rb_land = QRadioButton(T("แนวนอน"))
+        self.rb_auto.setChecked(True)
+        for b in (self.rb_auto, self.rb_port, self.rb_land):
+            orow.addWidget(b)
+        orow.addStretch(1)
+        left.addLayout(orow)
+        left.addStretch(1)
+
+        # ---------------- right: the preview ----------------
+        right = QVBoxLayout()
+        right.setSpacing(6)
+        body.addLayout(right, 1)
+        self.lb_scale = QLabel()
+        self.lb_scale.setStyleSheet("color:#6b7078;")
+        right.addWidget(self.lb_scale)
+        self.lb_paper = QLabel()
+        self.lb_paper.setStyleSheet("color:#6b7078;")
+        right.addWidget(self.lb_paper)
+        self.preview = QLabel()
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setMinimumSize(380, 430)
+        self.preview.setStyleSheet("QLabel { background:#e4e7eb; border:1px solid #d5d7db;"
+                                   " border-radius:4px; }")
+        right.addWidget(self.preview, 1)
+        nav = QHBoxLayout()
+        self.btn_prev = QPushButton("‹")
+        self.btn_next = QPushButton("›")
+        for b in (self.btn_prev, self.btn_next):
+            b.setFixedWidth(42)
+            b.setStyleSheet("QPushButton { background:#eef0f3; color:#2c2c2c; }")
+        self.lb_page = QLabel()
+        self.lb_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        nav.addWidget(self.btn_prev)
+        nav.addWidget(self.lb_page, 1)
+        nav.addWidget(self.btn_next)
+        right.addLayout(nav)
+
+        # ---------------- buttons ----------------
+        root.addWidget(_hline())
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        self.btn_print = QPushButton("🖨 " + T("พิมพ์"))
+        self.btn_print.setMinimumWidth(130)
+        self.btn_cancel = QPushButton(T("ยกเลิก"))
+        self.btn_cancel.setStyleSheet("QPushButton { background:#eef0f3; color:#2c2c2c; }")
+        bottom.addWidget(self.btn_print)
+        bottom.addWidget(self.btn_cancel)
+        root.addLayout(bottom)
+
+        # ---------------- wiring ----------------
+        # Radio buttons that merely share a parent widget end up in ONE
+        # exclusive group, so picking "actual size" would clear the page
+        # choice. Three explicit groups keep the three questions apart.
+        from PyQt6.QtWidgets import QButtonGroup
+        self._grp_pages = QButtonGroup(self)
+        self._grp_size = QButtonGroup(self)
+        self._grp_orient = QButtonGroup(self)
+        for b in (self.rb_all, self.rb_cur, self.rb_rng):
+            self._grp_pages.addButton(b)
+        for b in (self.rb_shrink, self.rb_fit, self.rb_actual, self.rb_custom):
+            self._grp_size.addButton(b)
+        for b in (self.rb_auto, self.rb_port, self.rb_land):
+            self._grp_orient.addButton(b)
+
+        self.cb_printer.currentTextChanged.connect(self._printer_changed)
+        self.btn_setup.clicked.connect(self._page_setup)
+        self.rb_rng.toggled.connect(self.ed_rng.setEnabled)
+        self.rb_custom.toggled.connect(self.sp_scale.setEnabled)
+        for b in (self.rb_all, self.rb_cur, self.rb_rng, self.rb_shrink, self.rb_fit,
+                  self.rb_actual, self.rb_custom, self.rb_auto, self.rb_port,
+                  self.rb_land, self.chk_gray):
+            b.toggled.connect(self._refresh)
+        self.ed_rng.textChanged.connect(self._refresh)
+        self.sp_scale.valueChanged.connect(self._refresh)
+        self.btn_prev.clicked.connect(lambda: self._step(-1))
+        self.btn_next.clicked.connect(lambda: self._step(1))
+        self.btn_print.clicked.connect(self._print)
+        self.btn_cancel.clicked.connect(self.reject)
+
+        self._printer_changed(self.cb_printer.currentText())
+
+    # ------------------------------------------------------------------
+    #  settings -> values
+    # ------------------------------------------------------------------
+    def pages(self):
+        """The page indexes to print, in order."""
+        if self.rb_cur.isChecked():
+            return [self.current]
+        if self.rb_rng.isChecked():
+            return parse_page_ranges(self.ed_rng.text(), self.n) or []
+        return list(range(self.n))
+
+    def _mode(self):
+        if self.rb_fit.isChecked():
+            return self.FIT
+        if self.rb_actual.isChecked():
+            return self.ACTUAL
+        if self.rb_custom.isChecked():
+            return self.CUSTOM
+        return self.SHRINK
+
+    def _apply_orientation(self):
+        from PyQt6.QtGui import QPageLayout
+        if self.rb_port.isChecked():
+            self.printer.setPageOrientation(QPageLayout.Orientation.Portrait)
+        elif self.rb_land.isChecked():
+            self.printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+
+    def _factor(self, pw, ph, aw, ah):
+        """How much to scale a pw x ph page (points) onto an aw x ah area."""
+        mode = self._mode()
+        if mode == self.ACTUAL:
+            return 1.0
+        if mode == self.CUSTOM:
+            return self.sp_scale.value() / 100.0
+        fit = min(aw / pw, ah / ph) if pw and ph else 1.0
+        return fit if mode == self.FIT else min(1.0, fit)
+
+    # ------------------------------------------------------------------
+    #  the one routine that draws a page, for the screen and for paper
+    # ------------------------------------------------------------------
+    def _draw_page(self, painter, pno, area_px, pt_to_px, dpi):
+        """Draw page `pno` into `area_px` (device pixels, the printable area).
+
+        `pt_to_px` converts points to those device pixels. Returns the scale
+        actually used, as a percentage, for the preview to display."""
+        page = self.doc[pno]
+        pw, ph = page.rect.width, page.rect.height
+        rotate = (self.rb_auto.isChecked()
+                  and (pw > ph) != (area_px.width() > area_px.height()))
+        if rotate:
+            pw, ph = ph, pw
+        aw_pt = area_px.width() / pt_to_px
+        ah_pt = area_px.height() / pt_to_px
+        factor = self._factor(pw, ph, aw_pt, ah_pt)
+
+        w = int(round(pw * factor * pt_to_px))
+        h = int(round(ph * factor * pt_to_px))
+        if w < 1 or h < 1:
+            return 0
+        # render only as many pixels as are going to be drawn
+        render_dpi = max(36.0, min(dpi, 72.0 * w / max(1.0, pw)))
+        pix = page.get_pixmap(dpi=int(render_dpi), alpha=False,
+                              colorspace=fitz.csGRAY if self.chk_gray.isChecked()
+                              else fitz.csRGB)
+        fmt = (QImage.Format.Format_Grayscale8 if self.chk_gray.isChecked()
+               else QImage.Format.Format_RGB888)
+        img = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt)
+        if rotate:
+            from PyQt6.QtGui import QTransform
+            img = img.transformed(QTransform().rotate(90))
+        x = area_px.x() + (area_px.width() - w) // 2
+        y = area_px.y() + (area_px.height() - h) // 2
+        painter.drawImage(QRect(x, y, w, h), img)
+        return int(round(factor * 100))
+
+    # ------------------------------------------------------------------
+    #  preview
+    # ------------------------------------------------------------------
+    def _printer_changed(self, name):
+        if name:
+            self.printer.setPrinterName(name)
+        self._refresh()
+
+    def _page_setup(self):
+        from PyQt6.QtPrintSupport import QPageSetupDialog
+        self._apply_orientation()
+        if QPageSetupDialog(self.printer, self).exec() == QDialog.DialogCode.Accepted:
+            self._refresh()
+
+    def _step(self, d):
+        pages = self.pages()
+        if pages:
+            self.preview_at = max(0, min(len(pages) - 1, self.preview_at + d))
+        self._refresh()
+
+    def _refresh(self):
+        T = self._T
+        self._apply_orientation()
+        pages = self.pages()
+        self.btn_print.setEnabled(bool(pages))
+        if not pages:
+            self.lb_count.setText(T("ยังไม่ได้เลือกหน้าที่จะพิมพ์"))
+            self.lb_page.setText("—")
+            self.preview.setPixmap(QPixmap())
+            self.lb_scale.clear()
+            self.lb_paper.clear()
+            self.btn_prev.setEnabled(False)
+            self.btn_next.setEnabled(False)
+            return
+        self.lb_count.setText(T("จะพิมพ์ %d หน้า") % len(pages))
+        self.preview_at = min(self.preview_at, len(pages) - 1)
+        self.btn_prev.setEnabled(self.preview_at > 0)
+        self.btn_next.setEnabled(self.preview_at < len(pages) - 1)
+
+        layout = self.printer.pageLayout()
+        full = layout.fullRectPoints()
+        paint = layout.paintRectPoints()
+        self.lb_paper.setText("%s  %.1f x %.1f %s" % (
+            T("กระดาษ:"), full.width() / 72.0, full.height() / 72.0, T("นิ้ว")))
+
+        # the paper, drawn to fit the preview box
+        box = self.preview.size()
+        s = min((box.width() - 24) / max(1, full.width()),
+                (box.height() - 24) / max(1, full.height()))
+        s = max(0.05, s)
+        pw, ph = int(full.width() * s), int(full.height() * s)
+        sheet = QPixmap(pw, ph)
+        sheet.fill(QColor("#ffffff"))
+        painter = QPainter(sheet)
+        area = QRect(int((paint.x() - full.x()) * s), int((paint.y() - full.y()) * s),
+                     int(paint.width() * s), int(paint.height() * s))
+        try:
+            pct = self._draw_page(painter, pages[self.preview_at], area, s,
+                                  dpi=max(36, int(72 * s * 2)))
+        finally:
+            painter.end()
+        edged = QPixmap(pw + 2, ph + 2)
+        edged.fill(QColor("#e4e7eb"))
+        p2 = QPainter(edged)
+        p2.setPen(QPen(QColor("#b9bdc4")))
+        p2.drawPixmap(1, 1, sheet)
+        p2.drawRect(0, 0, pw + 1, ph + 1)
+        p2.end()
+        self.preview.setPixmap(edged)
+        self.lb_scale.setText("%s %d%%" % (T("ย่อ/ขยาย:"), pct))
+        self.lb_page.setText(T("หน้า %d จาก %d") % (self.preview_at + 1, len(pages)))
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._refresh()
+
+    # ------------------------------------------------------------------
+    #  printing
+    # ------------------------------------------------------------------
+    def _print(self):
+        from PyQt6.QtPrintSupport import QPrinter
+        T = self._T
+        pages = self.pages()
+        if not pages:
+            return
+        self._apply_orientation()
+        self.printer.setCopyCount(self.sp_copies.value())
+        self.printer.setColorMode(QPrinter.ColorMode.GrayScale
+                                  if self.chk_gray.isChecked()
+                                  else QPrinter.ColorMode.Color)
+        bar = QProgressDialog(T("กำลังพิมพ์..."), T("ยกเลิก"), 0, len(pages), self)
+        bar.setWindowTitle(APP_NAME)
+        bar.setWindowModality(Qt.WindowModality.WindowModal)
+        bar.setMinimumDuration(300)
+        painter = QPainter()
+        if not painter.begin(self.printer):
+            bar.close()
+            QMessageBox.critical(self, APP_NAME,
+                                 T("เริ่มพิมพ์ไม่ได้ — ตรวจสอบเครื่องพิมพ์"))
+            return
+        done = 0
+        try:
+            dpi = max(96, min(self.printer.resolution(), 300))
+            pt_to_px = self.printer.resolution() / 72.0
+            for i, pno in enumerate(pages):
+                if bar.wasCanceled():
+                    self.printer.abort()
+                    break
+                if i:
+                    self.printer.newPage()
+                self._draw_page(painter, pno, painter.viewport(), pt_to_px, dpi)
+                done = i + 1
+                bar.setValue(done)
+                QApplication.processEvents()
+        finally:
+            painter.end()
+            bar.close()
+        self.printed = done
+        self.accept()
 
 
 class ScanEnhanceDialog(QDialog):

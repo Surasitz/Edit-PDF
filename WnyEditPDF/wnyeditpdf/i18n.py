@@ -554,15 +554,29 @@ EN = {
     "สร้างใบรับรองไม่สำเร็จ:\n%s": "Could not create the digital ID:\n%s",
     "สร้างใบรับรองแล้ว:\n%s\n\nเก็บไฟล์นี้และรหัสผ่านไว้ให้ดี":
         "Digital ID created:\n%s\n\nKeep this file and its password safe.",
-    # ----- print preview -----
-    "ดูตัวอย่างก่อนพิมพ์": "Print preview",
+    # ----- print dialog -----
     "ตั้งค่าหน้ากระดาษ...": "Page setup...",
-    "เต็มความกว้าง": "Fit width",
-    "สองหน้าคู่กัน": "Two pages",
-    "กำลังแสดงตัวอย่างทุกหน้าของเอกสาร "
-    "เลือกช่วงหน้าและเครื่องพิมพ์ได้ในหน้าต่างที่เปิดจากปุ่มพิมพ์":
-        "Showing every page of the document. The printer and the page range "
-        "are chosen in the dialog the print button opens.",
+    "เครื่องพิมพ์:": "Printer:",
+    "จำนวนชุด:": "Copies:",
+    "พิมพ์ขาวดำ": "Print in black and white",
+    "หน้าที่จะพิมพ์": "Pages to print",
+    "หน้าปัจจุบัน (หน้า %d)": "Current page (page %d)",
+    "ระบุหน้า:": "Pages:",
+    "จะพิมพ์ %d หน้า": "%d page(s) will be printed",
+    "ยังไม่ได้เลือกหน้าที่จะพิมพ์": "No pages chosen yet",
+    "ขนาดและการจัดวาง": "Size and placement",
+    "ย่อเฉพาะหน้าที่ใหญ่เกินกระดาษ": "Shrink oversized pages",
+    "พอดีกระดาษ (ย่อหรือขยายให้เต็ม)": "Fit to paper (shrink or enlarge)",
+    "ขนาดจริง (100%)": "Actual size (100%)",
+    "กำหนดเอง:": "Custom scale:",
+    "แนวกระดาษ": "Orientation",
+    "อัตโนมัติ": "Auto",
+    "แนวตั้ง": "Portrait",
+    "แนวนอน": "Landscape",
+    "กระดาษ:": "Paper:",
+    "นิ้ว": "inches",
+    "ย่อ/ขยาย:": "Scale:",
+    "หน้า %d จาก %d": "Page %d of %d",
     # ----- Windows file association ("Open with") -----
     "🔗 ตั้งให้เปิดไฟล์ PDF ด้วยโปรแกรมนี้...":
         "🔗 Open PDF files with this program...",
