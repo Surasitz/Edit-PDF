@@ -1,22 +1,24 @@
 # -*- coding: utf-8 -*-
-"""Draw wnyeditpdf/assets/pdf-doc.ico — the icon Windows puts on .pdf files
-when WnyEditPDF is their default program.
+"""Build the program's Windows icons from artwork, with PyMuPDF alone.
 
-The program's own logo (a navy app tile) is the wrong picture for a document:
-in Explorer every PDF then looks like a copy of the application. Acrobat shows
-a sheet of paper instead, and so do we — the white page with the red PDF tag
-taken out of our own logo, with no app tile behind it.
+Two icons ship inside WnyEditPDF.exe and they must stay different pictures:
 
-Drawn with PyMuPDF (already a dependency), so no extra build tools are needed:
+    wnyeditpdf/assets/logo.ico     the application  (taskbar, "Open with")
+    wnyeditpdf/assets/pdf-doc.ico  the .pdf files themselves, in Explorer
 
-    python tools/make_doc_icon.py                      # draw it
-    python tools/make_doc_icon.py --from artwork.png   # use a picture instead
-    python tools/make_doc_icon.py --preview            # + a PNG to eyeball
+Using the application logo for both is what makes every PDF in a folder look
+like a copy of the program, which is why the document icon is a sheet of paper.
 
-With --from, the picture is fitted into a square frame (keeping its shape, the
-spare room left transparent) and scaled down for every icon size. The drawn
-version exists as a fallback and because it stays sharp at 16 px, where a
-detailed picture turns to porridge.
+    python tools/make_icon.py --from assets/logo.png -o assets/logo.ico
+    python tools/make_icon.py --from art.png --preview   # see every size
+    python tools/make_icon.py                            # draw a fallback
+
+The picture is trimmed of its transparent border, fitted into a square frame
+(keeping its shape, the spare room left transparent) and redrawn at each icon
+size. Without --from a plain document icon is drawn instead; it exists as a
+fallback and because it stays sharp at 16 px, where detailed artwork turns to
+porridge. --preview writes a strip of every size at its true pixel size, which
+is the only honest way to judge an icon.
 """
 
 import argparse

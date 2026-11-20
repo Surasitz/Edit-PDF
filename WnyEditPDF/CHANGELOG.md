@@ -28,7 +28,14 @@
   โปรแกรมใช้เฉพาะกับตัวโปรแกรมเอง (เมนู "เปิดด้วย", หน้าแอปเริ่มต้น, ทาสก์บาร์)
   ไอคอนทั้งสองฝังอยู่ใน `WnyEditPDF.exe` ไฟล์เดียวเหมือนเดิม
   (`"...exe",0` = โลโก้, `"...exe",1` = ไอคอนเอกสาร) มี 9 ขนาดตั้งแต่ 16–256 px
-  สร้างใหม่ได้ด้วย `python tools/make_doc_icon.py --from wnyeditpdf/assets/pdf-doc-source.png`
+  สร้างใหม่ได้ด้วย `python tools/make_icon.py --from wnyeditpdf/assets/pdf-doc-source.png`
+
+### Changed (ไอคอน)
+- **โลโก้โปรแกรมใหม่** — กระดาษขอบแดงกับปากกา และป้าย **WNY PDF**
+  ใช้กับตัวโปรแกรมเอง (ทาสก์บาร์ หน้าต่าง เมนู "เปิดด้วย" หน้าแอปเริ่มต้น)
+  เป็นคนละรูปกับไอคอนเอกสารที่ไปอยู่บนไฟล์ PDF จึงแยกออกจากกันได้ทุกขนาด
+  สร้างจาก `wnyeditpdf/assets/logo.png` ด้วย `python tools/make_icon.py`
+  ได้ 9 ขนาด 16–256 px (เดิมมี 6 ขนาด)
 
 ### Changed
 - `build.bat` และ `WnyEditPDF.spec` หาเอนจิน PdfCraft จาก `engine\pdfcraft-cli.exe`
