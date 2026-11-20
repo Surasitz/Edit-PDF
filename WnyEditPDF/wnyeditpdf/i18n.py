@@ -554,6 +554,15 @@ EN = {
     "สร้างใบรับรองไม่สำเร็จ:\n%s": "Could not create the digital ID:\n%s",
     "สร้างใบรับรองแล้ว:\n%s\n\nเก็บไฟล์นี้และรหัสผ่านไว้ให้ดี":
         "Digital ID created:\n%s\n\nKeep this file and its password safe.",
+    # ----- print preview -----
+    "ดูตัวอย่างก่อนพิมพ์": "Print preview",
+    "ตั้งค่าหน้ากระดาษ...": "Page setup...",
+    "เต็มความกว้าง": "Fit width",
+    "สองหน้าคู่กัน": "Two pages",
+    "กำลังแสดงตัวอย่างทุกหน้าของเอกสาร "
+    "เลือกช่วงหน้าและเครื่องพิมพ์ได้ในหน้าต่างที่เปิดจากปุ่มพิมพ์":
+        "Showing every page of the document. The printer and the page range "
+        "are chosen in the dialog the print button opens.",
     # ----- Windows file association ("Open with") -----
     "🔗 ตั้งให้เปิดไฟล์ PDF ด้วยโปรแกรมนี้...":
         "🔗 Open PDF files with this program...",

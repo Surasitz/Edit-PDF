@@ -2024,44 +2024,152 @@ class DocToolsMixin:
 
     # ---------------- printing (Qt) ----------------
     def print_document(self):
-        """Print through the system's own print dialog. Each page is rendered
-        by PyMuPDF at the printer's resolution (capped at 300 dpi) and fitted
-        to the paper; a landscape page on portrait paper is turned to fit."""
+        """Show the pages as they will come out of the printer, then print.
+
+        Windows' own print dialog has a preview pane, but it only fills in for
+        programs that implement it — everyone else gets "This app doesn't
+        support print preview". So the preview is ours: the same painting code
+        that feeds the printer draws the pages on screen first."""
         if not self.pdf.is_open():
             return self.need_file()
-        from PyQt6.QtCore import QRect
-        from PyQt6.QtGui import QImage, QPainter, QTransform
-        from PyQt6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter
+        from PyQt6.QtPrintSupport import (QPageSetupDialog, QPrinter,
+                                          QPrintPreviewWidget)
         T = self.T
-        n = self.pdf.page_count
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setDocName(self._doc_name())
-        printer.setFromTo(1, n)
-        dlg = QPrintDialog(printer, self)
+        printer.setFromTo(1, self.pdf.page_count)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("%s — %s" % (T("ดูตัวอย่างก่อนพิมพ์"), self._doc_name()))
+        dlg.resize(980, 860)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
+
+        view = QPrintPreviewWidget(printer, dlg)
+        view.setZoomMode(QPrintPreviewWidget.ZoomMode.FitInView)
+        view.paintRequested.connect(lambda p: self._print_pages(p, preview=True))
+
+        row = QHBoxLayout()
+        btn_print = QPushButton("🖨 " + T("พิมพ์..."))
+        btn_setup = QPushButton(T("ตั้งค่าหน้ากระดาษ..."))
+        btn_out = QPushButton("－")
+        btn_in = QPushButton("＋")
+        btn_fit = QPushButton(T("พอดีหน้า"))
+        btn_wide = QPushButton(T("เต็มความกว้าง"))
+        btn_two = QPushButton(T("สองหน้าคู่กัน"))
+        btn_two.setCheckable(True)
+        btn_close = QPushButton(T("ปิด"))
+        for b in (btn_setup, btn_out, btn_in, btn_fit, btn_wide, btn_two, btn_close):
+            b.setStyleSheet("QPushButton { background:#eef0f3; color:#2c2c2c; }"
+                            "QPushButton:hover { background:#e2e5e9; }"
+                            "QPushButton:checked { background:#1473e6; color:#ffffff; }")
+        for b in (btn_out, btn_in):
+            b.setFixedWidth(38)
+        row.addWidget(btn_print)
+        row.addWidget(btn_setup)
+        row.addSpacing(12)
+        row.addWidget(btn_out)
+        row.addWidget(btn_in)
+        row.addWidget(btn_fit)
+        row.addWidget(btn_wide)
+        row.addWidget(btn_two)
+        row.addStretch(1)
+        row.addWidget(btn_close)
+        lay.addLayout(row)
+        lay.addWidget(view, 1)
+
+        hint = QLabel(T("กำลังแสดงตัวอย่างทุกหน้าของเอกสาร "
+                        "เลือกช่วงหน้าและเครื่องพิมพ์ได้ในหน้าต่างที่เปิดจากปุ่มพิมพ์"))
+        hint.setStyleSheet("QLabel { color:#6b7078; }")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        def two_pages(on):
+            view.setViewMode(QPrintPreviewWidget.ViewMode.FacingPagesView if on
+                             else QPrintPreviewWidget.ViewMode.SinglePageView)
+
+        def page_setup():
+            if QPageSetupDialog(printer, dlg).exec() == QDialog.DialogCode.Accepted:
+                view.updatePreview()
+
+        def do_print():
+            if self._print_now(printer, dlg):
+                dlg.accept()
+
+        btn_print.clicked.connect(do_print)
+        btn_setup.clicked.connect(page_setup)
+        btn_out.clicked.connect(view.zoomOut)
+        btn_in.clicked.connect(view.zoomIn)
+        btn_fit.clicked.connect(view.fitInView)
+        btn_wide.clicked.connect(view.fitToWidth)
+        btn_two.toggled.connect(two_pages)
+        btn_close.clicked.connect(dlg.reject)
+        dlg.exec()
+
+    def _print_now(self, printer, parent):
+        """Ask for a printer and a page range, then print. True when sent."""
+        from PyQt6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog
+        T = self.T
+        n = self.pdf.page_count
+        dlg = QPrintDialog(printer, parent)
         dlg.setOption(QAbstractPrintDialog.PrintDialogOption.PrintPageRange, True)
         dlg.setOption(QAbstractPrintDialog.PrintDialogOption.PrintCurrentPage, True)
         dlg.setMinMax(1, n)
         if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        rng = printer.printRange()
-        if rng == QPrinter.PrintRange.CurrentPage:
-            pages = [self.page_index]
-        elif rng == QPrinter.PrintRange.PageRange and printer.fromPage() > 0:
-            pages = list(range(printer.fromPage() - 1, min(printer.toPage(), n)))
-        else:
+            return False
+        return self._print_pages(printer, preview=False)
+
+    def _print_pages(self, printer, preview=False):
+        """Paint the document onto `printer`.
+
+        The one painting routine behind both the on-screen preview and the real
+        print job, so what is previewed is what comes out. Each page is
+        rendered by PyMuPDF and fitted to the paper; a landscape page on
+        portrait paper is turned to fit. The preview is rendered coarser — it
+        is a picture on a screen, and a whole document at printer resolution
+        would crawl."""
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QImage, QPainter, QTransform
+        from PyQt6.QtPrintSupport import QPrinter
+        T = self.T
+        n = self.pdf.page_count
+
+        if preview:
             pages = list(range(n))
-        dpi = max(96, min(printer.resolution(), 300))
-        bar = QProgressDialog(T("กำลังพิมพ์..."), T("ยกเลิก"), 0, len(pages), self)
-        bar.setWindowTitle(APP_NAME)
-        bar.setWindowModality(Qt.WindowModality.WindowModal)
-        bar.setMinimumDuration(300)
+        else:
+            rng = printer.printRange()
+            if rng == QPrinter.PrintRange.CurrentPage:
+                pages = [self.page_index]
+            elif rng == QPrinter.PrintRange.PageRange and printer.fromPage() > 0:
+                pages = list(range(printer.fromPage() - 1, min(printer.toPage(), n)))
+            else:
+                pages = list(range(n))
+        if not pages:
+            return False
+
+        dpi = 110 if preview else max(96, min(printer.resolution(), 300))
+        bar = None
+        if not preview:
+            bar = QProgressDialog(T("กำลังพิมพ์..."), T("ยกเลิก"), 0, len(pages), self)
+            bar.setWindowTitle(APP_NAME)
+            bar.setWindowModality(Qt.WindowModality.WindowModal)
+            bar.setMinimumDuration(300)
+        else:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
         painter = QPainter()
         if not painter.begin(printer):
-            QMessageBox.critical(self, APP_NAME, T("เริ่มพิมพ์ไม่ได้ — ตรวจสอบเครื่องพิมพ์"))
-            return
+            if bar:
+                bar.close()
+            else:
+                QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, APP_NAME,
+                                 T("เริ่มพิมพ์ไม่ได้ — ตรวจสอบเครื่องพิมพ์"))
+            return False
         try:
             for i, pno in enumerate(pages):
-                if bar.wasCanceled():
+                if bar and bar.wasCanceled():
                     printer.abort()
                     break
                 if i:
@@ -2077,12 +2185,19 @@ class DocToolsMixin:
                 x = area.x() + (area.width() - w) // 2
                 y = area.y() + (area.height() - h) // 2
                 painter.drawImage(QRect(x, y, w, h), img)
-                bar.setValue(i + 1)
-                QApplication.processEvents()
+                if bar:
+                    bar.setValue(i + 1)
+                    QApplication.processEvents()
         finally:
             painter.end()
-            bar.close()
+            if bar:
+                bar.close()
+            else:
+                QApplication.restoreOverrideCursor()
+        if preview:
+            return True
         self.status(T("ส่งไปพิมพ์แล้ว %d หน้า ✓") % len(pages))
+        return True
 
     # ---------------- crop ----------------
     def crop_pages(self):
