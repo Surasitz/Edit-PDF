@@ -2029,17 +2029,33 @@ class SignatureDialog(QDialog):
 #  PDF page view + mouse handling for every mode
 # ============================================================
 class PageView(QLabel):
-    """Show the PDF page and handle the mouse:
+    """Show the document as one continuous strip of pages and handle the mouse.
+
+    Every page sits in the strip at a fixed place, so the wheel runs from the
+    first page to the last without stopping at a page boundary — scrolling a
+    document is scrolling, not pressing "next page" over and over. Only the
+    pages the viewport actually shows are rendered, and those are cached, so a
+    500-page file costs the same as a 2-page one until you scroll into it.
+
+    Editing still happens on one page, the current one: clicking a page makes
+    it current, and the overlays (selection, drag box, handles, pen) are drawn
+    against that page's position in the strip.
+
     - dashed box: text (colour per mode) / image-signature (orange)
     - move mode: 4 corner handles on both images (orange) and text (green)
     - pen mode: drag to draw; comment mode: click to drop a note
     - Ctrl+wheel = zoom, wheel in placement mode = adjust stamp size."""
+
+    GAP = 14        # space between two pages in the strip
+    MARGIN = 12     # space above the first page and below the last
 
     def __init__(self, main_window):
         super().__init__()
         self.main = main_window
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMouseTracking(True)
+        self.pages = []           # [(top, width, height)] in widget pixels
+        self._cache = {}          # page index -> rendered QPixmap, current zoom
         # accept keyboard focus so arrow-key nudging reaches us instead of the
         # scroll area (which would otherwise just scroll the view)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -2065,16 +2081,96 @@ class PageView(QLabel):
         self.comment_moved = False
         self.cursor_pos = None        # signature/image placement mode
 
+    # ---------- the strip of pages ----------
+    def relayout(self):
+        """Work out where every page sits, for the zoom in force now.
+
+        Called whenever the document, the page order or the zoom changes. The
+        render cache goes with it: the pixmaps in it are the old zoom, or the
+        document before the edit."""
+        m = self.main
+        self._cache.clear()
+        self.pages = []
+        if not m.pdf.is_open() or m.pdf.page_count == 0:
+            self.setMinimumSize(1, 1)
+            self.update()
+            return
+        z = m.zoom
+        y = self.MARGIN
+        widest = 1
+        for i in range(m.pdf.page_count):
+            r = m.pdf.page_rect(i)
+            w, h = max(1, int(r.width * z)), max(1, int(r.height * z))
+            self.pages.append((y, w, h))
+            widest = max(widest, w)
+            y += h + self.GAP
+        self.setMinimumSize(widest + 2 * self.MARGIN,
+                            y - self.GAP + self.MARGIN)
+        self.update()
+
+    def page_top(self, pno):
+        """Where page `pno` starts, in widget pixels."""
+        if 0 <= pno < len(self.pages):
+            return self.pages[pno][0]
+        return 0
+
+    def page_at(self, y):
+        """The page the strip shows at height `y`; the nearest one in a gap."""
+        if not self.pages:
+            return None
+        for i, (top, _w, h) in enumerate(self.pages):
+            if y < top + h + self.GAP / 2:
+                return i
+        return len(self.pages) - 1
+
+    def visible_pages(self):
+        """(first, last) page indexes the viewport is showing."""
+        if not self.pages:
+            return (0, -1)
+        par = self.parentWidget()         # the scroll area's viewport
+        if par is None:
+            return (0, len(self.pages) - 1)
+        top = -self.y()                   # scrolled distance, in widget pixels
+        bottom = top + par.height()
+        first = self.page_at(top) or 0
+        last = self.page_at(bottom)
+        return first, (len(self.pages) - 1 if last is None else last)
+
+    def _page_pixmap(self, pno):
+        """The rendered page, from the cache or freshly rendered into it."""
+        pm = self._cache.get(pno)
+        if pm is not None:
+            return pm
+        try:
+            pix = self.main.pdf.render(pno, self.main.zoom)
+        except Exception:
+            return None
+        img = QImage(pix.samples, pix.width, pix.height, pix.stride,
+                     QImage.Format.Format_RGB888)
+        pm = QPixmap.fromImage(img)
+        self._cache[pno] = pm
+        return pm
+
+    def _prune_cache(self, first, last):
+        """Keep the pages on screen and their neighbours, drop the rest: a
+        long document at a high zoom would otherwise fill memory with pixmaps
+        nobody is looking at any more."""
+        keep = set(range(max(0, first - 2), last + 3))
+        for pno in [p for p in self._cache if p not in keep]:
+            del self._cache[pno]
+
     # ---------- coordinate conversion ----------
-    def _offsets(self):
-        pm = self.pixmap()
-        if pm is None:
+    def _offsets(self, pno=None):
+        """Top-left of a page inside the strip (the current page by default)."""
+        if not self.pages:
             return 0.0, 0.0
-        return (self.width() - pm.width()) / 2, (self.height() - pm.height()) / 2
+        pno = self.main.page_index if pno is None else pno
+        pno = max(0, min(pno, len(self.pages) - 1))
+        top, w, _h = self.pages[pno]
+        return (self.width() - w) / 2, float(top)
 
     def to_pdf_point(self, pos, clamp=False):
-        pm = self.pixmap()
-        if pm is None or not self.main.pdf.is_open():
+        if not self.pages or not self.main.pdf.is_open():
             return None
         ox, oy = self._offsets()
         x = (pos.x() - ox) / self.main.zoom
@@ -2211,6 +2307,13 @@ class PageView(QLabel):
     def mousePressEvent(self, ev):
         m = self.main
         pos = ev.position().toPoint()
+        # in the continuous strip the click may land on a page other than the
+        # one being edited: that page becomes the current one, so every tool
+        # below works on the page under the pointer
+        if self.pages:
+            under = self.page_at(pos.y())
+            if under is not None and under != m.page_index:
+                m.set_current_page(under, scroll=False)
         pt = self.to_pdf_point(pos)
         if m.mode == MODE_ADD_TEXT and pt:
             m.add_text_at(pt)
@@ -2399,26 +2502,36 @@ class PageView(QLabel):
         return QPoint(rect.right() if s.x() <= rect.left() else rect.left(),
                       rect.bottom() if s.y() <= rect.top() else rect.top())
 
-    def _paint_shadow(self):
-        """A soft shadow under the page so it lifts off the light canvas."""
-        pm = self.pixmap()
-        if pm is None or pm.isNull():
+    def _paint_pages(self):
+        """Draw the pages the viewport is showing, each on its own shadow."""
+        if not self.pages:
             return
-        ox, oy = self._offsets()
+        first, last = self.visible_pages()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
-        for grow, alpha in ((7, 8), (5, 12), (3, 18), (1, 30)):
-            p.setBrush(QColor(15, 23, 42, alpha))
-            p.drawRoundedRect(QRectF(ox - grow, oy - grow + 2, pm.width() + 2 * grow,
-                                     pm.height() + 2 * grow), grow + 1, grow + 1)
+        for i in range(first, last + 1):
+            top, w, h = self.pages[i]
+            ox = (self.width() - w) / 2
+            for grow, alpha in ((7, 8), (5, 12), (3, 18), (1, 30)):
+                p.setBrush(QColor(15, 23, 42, alpha))
+                p.drawRoundedRect(QRectF(ox - grow, top - grow + 2,
+                                         w + 2 * grow, h + 2 * grow),
+                                  grow + 1, grow + 1)
+        for i in range(first, last + 1):
+            pm = self._page_pixmap(i)
+            if pm is None:
+                continue
+            top = self.pages[i][0]
+            p.drawPixmap(int((self.width() - pm.width()) / 2), int(top), pm)
         p.end()
+        self._prune_cache(first, last)
 
     def paintEvent(self, ev):
-        self._paint_shadow()
         super().paintEvent(ev)
+        self._paint_pages()
         m = self.main
-        if self.pixmap() is None:
+        if not self.pages:
             return
         painter = QPainter(self)
 

@@ -151,6 +151,10 @@ class MainWindow(DocToolsMixin, QMainWindow):
         self.scroll.setWidget(self.page_view)
         self.scroll.setWidgetResizable(True)
         self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # the view scrolls through the whole document, so the page number has
+        # to follow the scrollbar rather than a "next page" button
+        self._auto_scroll = False
+        self.scroll.verticalScrollBar().valueChanged.connect(self._scrolled)
         for wdg in (self.page_view, self.scroll.viewport()):
             pal = wdg.palette()
             pal.setColor(QPalette.ColorRole.Window, QColor(CANVAS_GRAY))
@@ -1557,30 +1561,87 @@ class MainWindow(DocToolsMixin, QMainWindow):
             self.page_view.drag_start = None
             self.page_view.comment_drag = None
             self.page_view.pen_points = None
+        page_changed = getattr(self, "_rendered_page", -1) != self.page_index
         self._rendered_page = self.page_index
-        pix = self.pdf.render(self.page_index, self.zoom)
-        img = QImage(pix.samples, pix.width, pix.height, pix.stride,
-                     QImage.Format.Format_RGB888)
-        self.page_view.setPixmap(QPixmap.fromImage(img))
+        # lay the whole document out as one scrollable strip; only the pages
+        # on screen are actually rendered (PageView does that as it paints)
+        self.page_view.relayout()
+        if page_changed:
+            self.scroll_to_page(self.page_index)
 
-        self.page_spin.blockSignals(True)
-        self.page_spin.setMaximum(self.pdf.page_count)
-        self.page_spin.setValue(self.page_index + 1)
-        self.page_spin.blockSignals(False)
-        self.page_total.setText(f" / {self.pdf.page_count} ")
+        self._sync_page_widgets()
         self.zoom_combo.blockSignals(True)
         self.zoom_combo.setCurrentText(f"{int(round(self.zoom * 100))}%")
         self.zoom_combo.blockSignals(False)
-
-        if 0 <= self.page_index < self.thumbs.count():
-            self.thumbs.blockSignals(True)
-            self.thumbs.setCurrentRow(self.page_index)
-            self.thumbs.blockSignals(False)
 
         mod = "  ●" if self.pdf.modified else ""
         name = os.path.basename(self.pdf.path) if self.pdf.path else "ไม่มีชื่อ"
         self.setWindowTitle(f"{APP_NAME} — {name}{mod}")
         self._update_undo_buttons()
+
+    # ------------------------------------------------------------------
+    #  continuous scrolling: the page number follows what is on screen
+    # ------------------------------------------------------------------
+    def _sync_page_widgets(self):
+        """Point the page box and the thumbnail list at the current page."""
+        self.page_spin.blockSignals(True)
+        self.page_spin.setMaximum(max(1, self.pdf.page_count))
+        self.page_spin.setValue(self.page_index + 1)
+        self.page_spin.blockSignals(False)
+        self.page_total.setText(f" / {self.pdf.page_count} ")
+        if 0 <= self.page_index < self.thumbs.count():
+            self.thumbs.blockSignals(True)
+            self.thumbs.setCurrentRow(self.page_index)
+            self.thumbs.blockSignals(False)
+
+    def scroll_to_page(self, pno):
+        """Bring a page to the top of the view."""
+        if not self.pdf.is_open():
+            return
+        self._auto_scroll = True
+        try:
+            bar = self.scroll.verticalScrollBar()
+            bar.setValue(max(0, self.page_view.page_top(pno) - PageView.MARGIN))
+        finally:
+            self._auto_scroll = False
+
+    def set_current_page(self, pno, scroll=True):
+        """Make `pno` the page being worked on.
+
+        Used by scrolling and by clicking a page in the strip, so it only
+        moves the current page and the overlays that belong to it — it does
+        not re-render the document the way render_page() does."""
+        if not self.pdf.is_open():
+            return
+        pno = max(0, min(pno, self.pdf.page_count - 1))
+        if pno == self.page_index:
+            return
+        self.page_index = pno
+        self._rendered_page = pno
+        # overlays belong to the page they were made on
+        self.selection = None
+        self.page_view.sel_span = None
+        self.page_view.sel_img = None
+        self.page_view.drag_rect = None
+        self.page_view.drag_start = None
+        self.page_view.comment_drag = None
+        self.page_view.pen_points = None
+        self._sync_page_widgets()
+        if scroll:
+            self.scroll_to_page(pno)
+        self.page_view.update()
+
+    def _scrolled(self, _value):
+        """Follow the scroll: whichever page fills the view is the current one."""
+        if getattr(self, "_auto_scroll", False) or not self.pdf.is_open():
+            return
+        bar = self.scroll.verticalScrollBar()
+        # a third of the way down the viewport, so a page counts as "the page
+        # you are reading" once it covers most of the screen
+        y = bar.value() + self.scroll.viewport().height() * 0.35
+        pno = self.page_view.page_at(y)
+        if pno is not None:
+            self.set_current_page(pno, scroll=False)
 
     def build_thumbnails(self):
         self.thumbs.blockSignals(True)
